@@ -265,13 +265,19 @@ function advanceAlongRoute(
 }
 
 export function headingBetween(from: Readonly<LonLat>, to: Readonly<LonLat>): number {
-  const dx = (to.longitude - from.longitude) * Math.cos(((from.latitude + to.latitude) / 2) * (Math.PI / 180));
+  const dx =
+    (to.longitude - from.longitude) *
+    Math.cos(((from.latitude + to.latitude) / 2) * (Math.PI / 180));
   const dy = to.latitude - from.latitude;
   if (dx === 0 && dy === 0) return 0;
   return Math.atan2(dx, dy);
 }
 
-export function interpolate(from: Readonly<LonLat>, to: Readonly<LonLat>, fraction: number): LonLat {
+export function interpolate(
+  from: Readonly<LonLat>,
+  to: Readonly<LonLat>,
+  fraction: number,
+): LonLat {
   return {
     longitude: from.longitude + (to.longitude - from.longitude) * fraction,
     latitude: from.latitude + (to.latitude - from.latitude) * fraction,
@@ -287,7 +293,9 @@ export function offsetLonLat(
   const north = Math.cos(headingRadians) * distanceMeters;
   const east = Math.sin(headingRadians) * distanceMeters;
   return {
-    longitude: origin.longitude + east / (metersPerDegreeLatitude * Math.cos(origin.latitude * (Math.PI / 180))),
+    longitude:
+      origin.longitude +
+      east / (metersPerDegreeLatitude * Math.cos(origin.latitude * (Math.PI / 180))),
     latitude: origin.latitude + north / metersPerDegreeLatitude,
   };
 }
@@ -351,7 +359,8 @@ export function isVisibleByPolice(
 ): boolean {
   return units.some(
     (unit) =>
-      unit.mode !== 'disabled' && haversineMeters(playerPosition, unit.position) <= sightRadiusMeters,
+      unit.mode !== 'disabled' &&
+      haversineMeters(playerPosition, unit.position) <= sightRadiusMeters,
   );
 }
 

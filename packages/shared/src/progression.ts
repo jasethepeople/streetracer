@@ -1,13 +1,7 @@
 import type { LonLat } from './index';
 
 export type MissionKind =
-  | 'delivery'
-  | 'taxi'
-  | 'time-trial'
-  | 'checkpoint-race'
-  | 'getaway'
-  | 'hot-delivery'
-  | 'lay-low';
+  'delivery' | 'taxi' | 'time-trial' | 'checkpoint-race' | 'getaway' | 'hot-delivery' | 'lay-low';
 
 export const WANTED_MAX_LEVEL = 5 as const;
 

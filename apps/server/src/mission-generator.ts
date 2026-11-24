@@ -142,11 +142,11 @@ export function generateMissionOffers(
   }
 
   if (offers.length < MAX_OFFER_COUNT && candidates.length >= 2) {
-  for (const kind of HEAT_MISSION_KINDS) {
-    if (offers.length >= MAX_OFFER_COUNT - 1) break;
-    const offer = createHeatOffer(graph, kind, candidates, areaKey, seed);
-    if (offer) offers.push(offer);
-  }
+    for (const kind of HEAT_MISSION_KINDS) {
+      if (offers.length >= MAX_OFFER_COUNT - 1) break;
+      const offer = createHeatOffer(graph, kind, candidates, areaKey, seed);
+      if (offer) offers.push(offer);
+    }
 
     for (let index = 0; index < candidates.length && offers.length < MAX_OFFER_COUNT; index += 1) {
       const first = candidates[index]!;

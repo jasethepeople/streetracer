@@ -21,6 +21,9 @@ export class RapierVehicle {
   private damage = 0;
   private lastImpactAtMs = 0;
 
+  /** Invoked when the chassis takes a hard collision (impact speed delta in m/s). */
+  onImpact: ((impactMetersPerSecond: number) => void) | null = null;
+
   private constructor(world: RAPIER.World, origin: LonLat, vehicleId: string) {
     this.world = world;
     this.origin = { ...origin };
@@ -261,6 +264,7 @@ export class RapierVehicle {
     if (speedBeforeStep < 7 || impact < 3.2 || timestamp - this.lastImpactAtMs < 1_200) return;
     this.damage = Math.min(100, this.damage + clamp((impact - 2.4) * 2.2, 4, 22));
     this.lastImpactAtMs = timestamp;
+    this.onImpact?.(impact);
   }
 
   private startHeight(): number {

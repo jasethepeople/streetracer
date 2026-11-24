@@ -10,6 +10,8 @@ const profile: PlayerProfile = {
   damage: 10,
   totalMissions: 2,
   activeMission: null,
+  wantedLevel: 0,
+  wantedHeat: 0,
 };
 
 describe('local progress store', () => {

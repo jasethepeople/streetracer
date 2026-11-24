@@ -159,7 +159,8 @@ export function parseClientMessage(text: string): MessageParseResult {
         return failure('INVALID_DAMAGE', 'Vehicle damage is invalid.');
       }
       return { ok: true, message: { version: 1, type: 'damage-report', damage } };
-    }    case 'impact-report': {
+    }
+    case 'impact-report': {
       const targetKind = parsed.targetKind;
       if (
         targetKind !== 'vehicle' &&

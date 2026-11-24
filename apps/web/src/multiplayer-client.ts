@@ -6,6 +6,7 @@ import {
   type LeaderboardSnapshot,
   type LonLat,
   type MissionOffer,
+  type ImpactTargetKind,
   type NetworkCarState,
   type PlayerProfile,
   type PublicPlayerState,
@@ -30,6 +31,9 @@ export interface MultiplayerClientCallbacks {
   ) => void;
   readonly onLeaderboard: (snapshot: LeaderboardSnapshot) => void;
   readonly onRaceCreated: (offer: MissionOffer) => void;
+  readonly onPursuit: (pursuit: Extract<ServerMessage, { type: 'pursuit' }>) => void;
+  readonly onBusted: (busted: Extract<ServerMessage, { type: 'busted' }>) => void;
+  readonly onWrecked: (wrecked: Extract<ServerMessage, { type: 'wrecked' }>) => void;
   readonly onStatus: (message: string) => void;
 }
 
@@ -122,6 +126,16 @@ export class MultiplayerClient {
 
   sendDamageReport(damage: number): void {
     if (this.joined) this.send({ version: PROTOCOL_VERSION, type: 'damage-report', damage });
+  }
+
+  sendWantedHeat(heat: number): void {
+    if (!this.joined) return;
+    this.send({ version: PROTOCOL_VERSION, type: 'wanted-heat', heat });
+  }
+
+  sendImpactReport(targetKind: ImpactTargetKind, hardness: number): void {
+    if (!this.joined || hardness < 25) return;
+    this.send({ version: PROTOCOL_VERSION, type: 'impact-report', targetKind, hardness });
   }
 
   relocate(): void {
@@ -234,6 +248,15 @@ export class MultiplayerClient {
         break;
       case 'race-created':
         this.callbacks.onRaceCreated(message.offer);
+        break;
+      case 'pursuit':
+        this.callbacks.onPursuit(message);
+        break;
+      case 'busted':
+        this.callbacks.onBusted(message);
+        break;
+      case 'wrecked':
+        this.callbacks.onWrecked(message);
         break;
       case 'pong':
         break;

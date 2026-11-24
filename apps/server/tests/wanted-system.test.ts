@@ -157,7 +157,14 @@ describe('pursuit snapshots', () => {
       damage: unit.damage,
     };
     expect(Object.keys(snapshot)).toEqual(
-      expect.arrayContaining(['id', 'mode', 'position', 'headingRadians', 'speedMetersPerSecond', 'damage']),
+      expect.arrayContaining([
+        'id',
+        'mode',
+        'position',
+        'headingRadians',
+        'speedMetersPerSecond',
+        'damage',
+      ]),
     );
     expect('route' in snapshot).toBe(false);
   });
