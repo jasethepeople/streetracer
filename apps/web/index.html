@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#101718" />
+    <meta
+      name="description"
+      content="Drive a physics-based car through real OpenStreetMap streets."
+    />
+    <title>OpenStreetRacer — Real Streets, Real Driving</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="world" aria-label="3D OpenStreetMap driving world"></div>
+      <div id="player-labels" class="player-labels" aria-hidden="true"></div>
+      <div id="minimap" aria-hidden="true"></div>
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="OpenStreetRacer home">
+          <span class="brand-mark">OSR</span><span>OPENSTREETRACER</span>
+        </a>
+        <div class="location-card">
+          <div class="location-caption">DRIVING IN</div>
+          <div id="location-label" class="location-label">Denver, Colorado</div>
+          <div id="status" class="status" aria-live="polite">Starting 3D world…</div>
+        </div>
+      </header>
+      <button
+        id="game-menu-toggle"
+        class="menu-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="game-menu"
+      >
+        Menu
+      </button>
+      <section id="game-menu" class="game-menu" aria-label="Game menu" hidden>
+        <header class="game-menu-header">
+          <div>
+            <div class="menu-eyebrow">OPENSTREETRACER</div>
+            <strong>Driver menu</strong>
+            <div id="game-menu-profile" class="menu-profile">Loading player…</div>
+          </div>
+          <button id="game-menu-close" class="menu-close" type="button" aria-label="Close menu">
+            ×
+          </button>
+        </header>
+        <nav class="menu-tabs" aria-label="Game menu sections">
+          <button type="button" data-menu-tab="missions" aria-selected="true">Missions</button>
+          <button type="button" data-menu-tab="build" aria-selected="false">Build</button>
+          <button type="button" data-menu-tab="garage" aria-selected="false">Garage</button>
+          <button type="button" data-menu-tab="leaderboards" aria-selected="false">Scores</button>
+          <button type="button" data-menu-tab="settings" aria-selected="false">Settings</button>
+        </nav>
+        <p id="game-menu-status" class="menu-status" role="status" aria-live="polite"></p>
+        <div id="game-menu-content" class="menu-content"></div>
+      </section>
+      <form id="city-search" class="search-panel" role="search">
+        <label for="city-query">Find a city</label>
+        <div class="search-row">
+          <input
+            id="city-query"
+            name="q"
+            type="search"
+            minlength="3"
+            placeholder="Search a city or place"
+            autocomplete="off"
+          />
+          <button type="submit">Go</button>
+        </div>
+        <button id="use-location" class="location-button" type="button">Use my location</button>
+        <p id="search-message" class="search-message" aria-live="polite"></p>
+      </form>
+      <form id="route-form" class="route-panel">
+        <label for="route-query">Route to a place</label>
+        <div class="search-row">
+          <input
+            id="route-query"
+            name="destination"
+            type="search"
+            minlength="3"
+            placeholder="Search a destination"
+            autocomplete="off"
+          />
+          <button type="submit">Route</button>
+        </div>
+        <div class="route-actions">
+          <p id="route-status" class="route-status" role="status" aria-live="polite">
+            Enter a place to plan a route.
+          </p>
+          <button id="route-clear" class="route-clear" type="button">Clear</button>
+        </div>
+      </form>
+      <section class="speed-card" aria-label="Driving status">
+        <div class="speed-caption">SPEED</div>
+        <div id="speed" class="speed-value">0 km/h</div>
+        <div id="street" class="street-name">Finding a street…</div>
+        <div id="world-status" class="world-status" role="status" aria-live="polite">
+          Road network loading…
+        </div>
+        <div class="audio-controls" aria-label="Sound settings">
+          <button id="audio-mute" type="button" aria-pressed="false">Mute</button>
+          <label class="volume-control" for="master-volume">
+            <span>Volume</span>
+            <input id="master-volume" type="range" min="0" max="1" step="0.01" value="0.3" />
+            <output id="volume-value" for="master-volume">30%</output>
+          </label>
+        </div>
+      </section>
+      <div class="controls-help" aria-hidden="true">
+        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows · <kbd>Space</kbd> handbrake ·
+        <kbd>C</kbd> camera · <kbd>F3</kbd> debug
+      </div>
+      <button
+        id="chat-toggle"
+        class="chat-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="chat-panel"
+      >
+        Nearby <span id="nearby-count">0</span>
+      </button>
+      <section id="chat-panel" class="chat-panel" aria-label="Nearby drivers and chat" hidden>
+        <header class="chat-header">
+          <div>
+            <strong>Nearby drivers</strong>
+            <div id="network-status" class="network-status" aria-live="polite">Connecting…</div>
+          </div>
+          <button id="chat-close" class="chat-close" type="button" aria-label="Close chat">
+            ×
+          </button>
+        </header>
+        <div
+          id="chat-log"
+          class="chat-log"
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions"
+        ></div>
+        <form id="chat-form" class="chat-form">
+          <label class="visually-hidden" for="chat-input">Message nearby drivers</label>
+          <input
+            id="chat-input"
+            name="message"
+            maxlength="160"
+            autocomplete="off"
+            placeholder="Say something…"
+          />
+          <button type="submit">Send</button>
+        </form>
+      </section>
+      <button
+        id="camera-toggle"
+        class="camera-toggle"
+        type="button"
+        aria-pressed="false"
+        aria-label="Switch to hood camera"
+      >
+        Hood view
+      </button>
+      <div id="debug-overlay" class="debug-overlay" aria-live="polite" hidden></div>
+      <div id="joystick" class="joystick" aria-label="Touch driving joystick" role="application">
+        <div class="joystick-ring"><div id="joystick-knob" class="joystick-knob"></div></div>
+        <span>DRIVE</span>
+      </div>
+      <div class="osm-credit">
+        <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">
+          © OpenStreetMap contributors
+        </a>
+        <span aria-hidden="true">·</span>
+        <a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a>
+        <span aria-hidden="true">·</span>
+        <a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a>
+      </div>
+      <div id="map-error" class="map-error" role="alert" hidden></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

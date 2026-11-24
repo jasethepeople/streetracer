@@ -1,0 +1,25 @@
+{
+  "name": "@openstreet-racer/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup --config tsup.config.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json",
+    "simulate": "tsx src/load-test.ts"
+  },
+  "dependencies": {
+    "@openstreet-racer/vehicle": "workspace:*",
+    "@openstreet-racer/game": "workspace:*",
+    "ws": "8.23.0"
+  },
+  "devDependencies": {
+    "@openstreet-racer/shared": "workspace:*",
+    "@openstreet-racer/world": "workspace:*",
+    "@types/ws": "^8.18.1",
+    "tsup": "^9.0.0",
+    "tsx": "^4.23.15"
+  }
+}

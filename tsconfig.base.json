@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "paths": {
+      "@openstreet-racer/shared": ["./packages/shared/src/index.ts"],
+      "@openstreet-racer/game": ["./packages/game/src/index.ts"],
+      "@openstreet-racer/world": ["./packages/world/src/index.ts"],
+      "@openstreet-racer/vehicle": ["./packages/vehicle/src/index.ts"],
+      "@openstreet-racer/vehicle/catalog": ["./packages/vehicle/src/catalog.ts"],
+
+      "@openstreet-racer/vehicle/physics": ["./packages/vehicle/src/physics.ts"],
+      "@openstreet-racer/vehicle/rapier": ["./packages/vehicle/src/rapier-vehicle.ts"],
+      "@openstreet-racer/ui": ["./packages/ui/src/index.ts"]
+    }
+  }
+}

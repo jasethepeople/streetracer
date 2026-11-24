@@ -1,0 +1,102 @@
+[
+  {
+    "id": "sedan",
+    "name": "City Sedan",
+    "category": "Everyday",
+    "costCents": 0,
+    "visual": "sedan",
+    "dimensions": {
+      "width": 1.84,
+      "length": 4.2,
+      "height": 1.42,
+      "wheelbase": 2.55,
+      "track": 1.58,
+      "wheelRadius": 0.35
+    },
+    "handling": {
+      "massKg": 1120,
+      "engineForce": 4500,
+      "brakeForce": 2200,
+      "maxSpeedMps": 48,
+      "maxReverseMps": 9,
+      "steeringRadians": 0.65,
+      "grip": 6.8,
+      "suspensionStiffness": 38
+    }
+  },
+  {
+    "id": "truck",
+    "name": "Utility Truck",
+    "category": "Heavy duty",
+    "costCents": 7500,
+    "visual": "truck",
+    "dimensions": {
+      "width": 2.12,
+      "length": 5.5,
+      "height": 2.15,
+      "wheelbase": 3.35,
+      "track": 1.8,
+      "wheelRadius": 0.48
+    },
+    "handling": {
+      "massKg": 2600,
+      "engineForce": 8000,
+      "brakeForce": 2800,
+      "maxSpeedMps": 38,
+      "maxReverseMps": 5,
+      "steeringRadians": 0.5,
+      "grip": 5.8,
+      "suspensionStiffness": 58
+    }
+  },
+  {
+    "id": "sports-car",
+    "name": "Sport Coupe",
+    "category": "Performance",
+    "costCents": 15000,
+    "visual": "sports-car",
+    "dimensions": {
+      "width": 1.92,
+      "length": 4.35,
+      "height": 1.08,
+      "wheelbase": 2.62,
+      "track": 1.68,
+      "wheelRadius": 0.34
+    },
+    "handling": {
+      "massKg": 1280,
+      "engineForce": 6500,
+      "brakeForce": 3000,
+      "maxSpeedMps": 58,
+      "maxReverseMps": 8,
+      "steeringRadians": 0.7,
+      "grip": 8.0,
+      "suspensionStiffness": 44
+    }
+  },
+  {
+    "id": "motorbike",
+    "name": "Street Motorbike",
+    "category": "Two wheels",
+    "costCents": 2500,
+    "visual": "motorbike",
+    "dimensions": {
+      "width": 0.9,
+      "length": 2.2,
+      "height": 1.28,
+      "wheelbase": 1.42,
+      "track": 0.54,
+      "wheelRadius": 0.34
+    },
+    "handling": {
+      "massKg": 270,
+      "engineForce": 2600,
+      "brakeForce": 1600,
+      "maxSpeedMps": 50,
+      "maxReverseMps": 3,
+      "steeringRadians": 0.75,
+      "grip": 6.2,
+      "suspensionStiffness": 32
+    }
+  }
+]
