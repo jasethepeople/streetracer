@@ -55,16 +55,12 @@ import {
   applyRedLight,
   applySpeeding,
   BUSTED_CONTACT_RADIUS_METERS,
-  BUSTED_CONTACT_SECONDS,
   BUSTED_CONTACT_SPEED_MPS,
-  clampWanted,
   createPoliceUnit,
   DEFAULT_SPEED_LIMIT_MPS,
   advancePoliceUnit,
   policeCountForLevel,
   policeCruiseSpeed,
-  IMPACT_MIN_HARDNESS,
-  isSpeeding,
   isVisibleByPolice,
   nearestUnitDistance,
   offsetLonLat,
@@ -73,7 +69,6 @@ import {
   POLICE_IMPACT_RADIUS_METERS,
   ROADBLOCK_AHEAD_METERS,
   ROADBLOCK_MIN_LEVEL,
-  roadblockAnchor,
   POLICE_SPAWN_MIN_METERS,
   POLICE_SPAWN_MAX_METERS,
   RED_LIGHT_MIN_SPEED_MPS,
@@ -92,10 +87,8 @@ import {
 import {
   cooldownMultiplierFor,
   evaluateHeatMission,
-  GETAWAY_START_LEVEL,
   heatMissionStartLevel,
   HOT_DELIVERY_COMPLETION_HEAT,
-  HOT_DELIVERY_HEAT_LEVEL,
   isHeatMission,
   layLowRewardCents,
 } from './wanted-missions';
@@ -1036,6 +1029,15 @@ export function createGameServer(options: GameServerOptions = {}) {
       return;
     }
     sendProgress(session, completed);
+    if (active.offer.kind === 'hot-delivery') {
+      const pursuit = session.pursuit;
+      const next = addWantedHeat(
+        { level: pursuit.level, heat: pursuit.heat },
+        HOT_DELIVERY_COMPLETION_HEAT,
+      );
+      setSessionWanted(session, next.level, next.heat);
+      sendPursuit(session, timestamp, true);
+    }
     const raceId =
       active.offer.kind === 'time-trial' || active.offer.kind === 'checkpoint-race'
         ? active.offer.id
