@@ -5,6 +5,7 @@ import {
   type AmbientActorState,
   type GameState,
   type LonLat,
+  type PoliceUnitState,
   type TrafficControlSnapshot,
   type WorldSnapshot,
 } from '@openstreet-racer/shared';
@@ -49,9 +50,45 @@ export interface MissionMarker {
   readonly active: boolean;
 }
 
+interface PoliceCarView {
+  readonly group: THREE.Group;
+  readonly lightRed: THREE.MeshStandardMaterial;
+  readonly lightBlue: THREE.MeshStandardMaterial;
+  targetX: number;
+  targetZ: number;
+  heading: number;
+}
+
+interface Puff {
+  position: THREE.Vector3;
+  velocity: THREE.Vector3;
+  ageSeconds: number;
+  lifetimeSeconds: number;
+  sizeMeters: number;
+  color: THREE.Color;
+}
+
 interface MissionMarkerView {
   readonly group: THREE.Group;
   readonly location: Readonly<LonLat>;
+}
+
+interface PoliceCarView {
+  readonly group: THREE.Group;
+  readonly lightRed: THREE.MeshStandardMaterial;
+  readonly lightBlue: THREE.MeshStandardMaterial;
+  targetX: number;
+  targetZ: number;
+  heading: number;
+}
+
+interface Puff {
+  position: THREE.Vector3;
+  velocity: THREE.Vector3;
+  ageSeconds: number;
+  lifetimeSeconds: number;
+  sizeMeters: number;
+  color: THREE.Color;
 }
 
 const MAX_PIXEL_RATIO = 1.25;
@@ -60,6 +97,10 @@ const REMOTE_CAR_DRAW_DISTANCE_METERS = 4_500;
 const REMOTE_LABEL_DISTANCE_METERS = 1_800;
 const AMBIENT_DRAW_DISTANCE_METERS = 2_200;
 const TRAFFIC_CONTROL_DRAW_DISTANCE_METERS = 1_600;
+const POLICE_LIGHT_FLASH_HZ = 2.4;
+const MAX_SMOKE_PUFFS = 90;
+const MAX_EXPLOSION_SPARKS = 60;
+const SIREN_SIGHT_METERS = 1_000;
 
 const COLORS = {
   skyDay: new THREE.Color('#94c9e3'),
@@ -108,6 +149,26 @@ export class WorldRenderer implements ChunkSink {
   private readonly routeGroup = new THREE.Group();
   private readonly missionMarkerGroup = new THREE.Group();
   private readonly missionMarkerViews = new Map<string, MissionMarkerView>();
+  private readonly policeGroup = new THREE.Group();
+  private readonly policeViews = new Map<string, PoliceCarView>();
+  private wantedLevel = 0;
+  private readonly policeBodyGeometry = new THREE.BoxGeometry(1.7, 0.62, 4.1);
+  private readonly policeCabinGeometry = new THREE.BoxGeometry(1.45, 0.5, 1.9);
+  private readonly policeBarGeometry = new THREE.BoxGeometry(1.1, 0.13, 0.3);
+  private readonly policeBodyMaterial = new THREE.MeshStandardMaterial({
+    color: '#f2f4f5',
+    roughness: 0.55,
+    metalness: 0.18,
+  });
+  private readonly policeAccentMaterial = new THREE.MeshStandardMaterial({
+    color: '#14161a',
+    roughness: 0.45,
+    metalness: 0.2,
+  });
+  private readonly smokeParticles: THREE.Points;
+  private readonly smokePuffs: Puff[] = [];
+  private readonly sparkPuffs: Puff[] = [];
+  private explosionActiveUntil = 0;
   private readonly ambientActors = new Map<string, AmbientActorView>();
   private readonly trafficControls = new Map<string, TrafficControlView>();
   private routePoints: readonly LonLat[] = [];
@@ -166,10 +227,17 @@ export class WorldRenderer implements ChunkSink {
       this.ambientGroup,
       this.routeGroup,
       this.missionMarkerGroup,
+      this.policeGroup,
       this.ambientLight,
       this.sun,
       this.sun.target,
     );
+    this.smokeParticles = new THREE.Points(
+      WorldRenderer.createPuffGeometry(),
+      WorldRenderer.createPuffMaterial(),
+    );
+    this.smokeParticles.frustumCulled = false;
+    this.scene.add(this.smokeParticles);
     this.scene.fog = new THREE.Fog(COLORS.skyDay, 900, 2_650);
     this.sun.position.set(-250, 600, -350);
     this.createCar();
@@ -848,6 +916,185 @@ export class WorldRenderer implements ChunkSink {
     this.remoteGroup.remove(view.group);
     view.label.remove();
     this.remoteCars.delete(id);
+  }
+
+  updatePursuit(police: readonly PoliceUnitState[], origin: LonLat, wantedLevel: number): void {
+    this.origin = { ...origin };
+    const visibleIds = new Set<string>();
+    for (const unit of police) {
+      const position = lonLatToLocalMeters(unit.position, origin);
+      const distance = Math.hypot(position.x, position.y);
+      if (distance > SIREN_SIGHT_METERS) continue;
+      visibleIds.add(unit.id);
+      let view = this.policeViews.get(unit.id);
+      if (!view) {
+        view = this.createPoliceCar();
+        this.policeViews.set(unit.id, view);
+      }
+      view.targetX = position.x;
+      view.targetZ = -position.y;
+      view.heading = unit.headingRadians;
+      const disabled = unit.mode === 'disabled' || unit.damage >= 100;
+      view.group.visible = !disabled || unit.damage < 100;
+      view.lightRed.emissiveIntensity = disabled ? 0.05 : 1.6;
+      view.lightBlue.emissiveIntensity = disabled ? 0.05 : 1.6;
+    }
+    for (const id of [...this.policeViews.keys()]) {
+      if (!visibleIds.has(id)) {
+        const view = this.policeViews.get(id);
+        if (view) this.policeGroup.remove(view.group);
+        view?.group.traverse((object) => {
+          if (object instanceof THREE.Mesh) object.geometry.dispose();
+        });
+        this.policeViews.delete(id);
+      }
+    }
+    this.wantedLevel = wantedLevel;
+  }
+
+  triggerExplosion(): void {
+    this.explosionActiveUntil = performance.now() + 1_400;
+    const center = this.car.position.clone();
+    for (let index = 0; index < MAX_EXPLOSION_SPARKS; index += 1) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 4 + Math.random() * 14;
+      this.sparkPuffs.push({
+        position: center.clone().add(new THREE.Vector3(0, 0.8, 0)),
+        velocity: new THREE.Vector3(
+          Math.cos(angle) * speed,
+          4 + Math.random() * 9,
+          Math.sin(angle) * speed,
+        ),
+        ageSeconds: 0,
+        lifetimeSeconds: 0.7 + Math.random() * 0.7,
+        sizeMeters: 0.5 + Math.random() * 0.9,
+        color: new THREE.Color().setHSL(0.06 + Math.random() * 0.06, 0.95, 0.55),
+      });
+    }
+  }
+
+  private static createPuffGeometry(): THREE.BufferGeometry {
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array((MAX_SMOKE_PUFFS + MAX_EXPLOSION_SPARKS) * 3);
+    const colors = new Float32Array((MAX_SMOKE_PUFFS + MAX_EXPLOSION_SPARKS) * 3);
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    return geometry;
+  }
+
+  private static createPuffMaterial(): THREE.PointsMaterial {
+    return new THREE.PointsMaterial({
+      size: 1.6,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+      vertexColors: true,
+      sizeAttenuation: true,
+    });
+  }
+
+  private createPoliceCar(): PoliceCarView {
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(this.policeBodyGeometry, this.policeBodyMaterial);
+    body.position.y = 0.32;
+    const stripe = new THREE.Mesh(this.policeBarGeometry, this.policeAccentMaterial);
+    stripe.scale.set(1.4, 1.1, 1.9);
+    stripe.position.set(0, 0.33, 0.2);
+    const cabin = new THREE.Mesh(this.policeCabinGeometry, this.policeAccentMaterial);
+    cabin.position.set(0, 0.85, -0.1);
+    const lightRed = new THREE.MeshStandardMaterial({
+      color: '#2a0505',
+      emissive: new THREE.Color('#ff2a2a'),
+      emissiveIntensity: 1.6,
+      roughness: 0.4,
+    });
+    const lightBlue = new THREE.MeshStandardMaterial({
+      color: '#050a2a',
+      emissive: new THREE.Color('#2a6aff'),
+      emissiveIntensity: 1.6,
+      roughness: 0.4,
+    });
+    const lampLeft = new THREE.Mesh(this.policeBarGeometry, lightRed);
+    lampLeft.position.set(-0.32, 1.16, -0.1);
+    lampLeft.scale.set(0.55, 1, 1);
+    const lampRight = new THREE.Mesh(this.policeBarGeometry, lightBlue);
+    lampRight.position.set(0.32, 1.16, -0.1);
+    lampRight.scale.set(0.55, 1, 1);
+    group.add(body, stripe, cabin, lampLeft, lampRight);
+    this.policeGroup.add(group);
+    return { group, lightRed, lightBlue, targetX: 0, targetZ: 0, heading: 0 };
+  }
+
+  private updatePoliceCars(deltaSeconds: number, elapsedSeconds: number): void {
+    const blend = 1 - Math.exp(-Math.max(0, deltaSeconds) * 4.5);
+    const flashPhase = Math.sin(elapsedSeconds * Math.PI * 2 * POLICE_LIGHT_FLASH_HZ) >= 0;
+    for (const view of this.policeViews.values()) {
+      const position = view.group.position;
+      position.x += (view.targetX - position.x) * blend;
+      position.z += (view.targetZ - position.z) * blend;
+      view.group.rotation.y = Math.PI - view.heading;
+      if (view.group.visible) {
+        view.lightRed.emissiveIntensity = flashPhase ? 2.4 : 0.15;
+        view.lightBlue.emissiveIntensity = flashPhase ? 0.15 : 2.4;
+      }
+    }
+  }
+
+  private updateParticles(deltaSeconds: number): void {
+    const geometry = this.smokeParticles.geometry;
+    const positionAttribute = geometry.getAttribute('position') as THREE.BufferAttribute;
+    const colorAttribute = geometry.getAttribute('color') as THREE.BufferAttribute;
+    let index = 0;
+    const writePuff = (puff: Puff, sink: number): void => {
+      puff.ageSeconds += deltaSeconds;
+      puff.position.addScaledVector(puff.velocity, deltaSeconds);
+      puff.velocity.multiplyScalar(1 - Math.min(1, deltaSeconds * 1.6));
+      puff.velocity.y += sink * deltaSeconds;
+      if (puff.ageSeconds >= puff.lifetimeSeconds || index >= positionAttribute.count) return;
+      const fade = 1 - puff.ageSeconds / puff.lifetimeSeconds;
+      positionAttribute.setXYZ(index, puff.position.x, puff.position.y, puff.position.z);
+      colorAttribute.setXYZ(index, puff.color.r * fade, puff.color.g * fade, puff.color.b * fade);
+      index += 1;
+    };
+    this.smokePuffs.slice().forEach((puff, puffIndex) => {
+      if (puff.ageSeconds >= puff.lifetimeSeconds) {
+        this.smokePuffs.splice(puffIndex, 1);
+        return;
+      }
+      writePuff(puff, 1.4);
+    });
+    this.sparkPuffs.slice().forEach((puff, puffIndex) => {
+      if (puff.ageSeconds >= puff.lifetimeSeconds) {
+        this.sparkPuffs.splice(puffIndex, 1);
+        return;
+      }
+      writePuff(puff, -7.5);
+    });
+    for (let rest = index; rest < positionAttribute.count; rest += 1) {
+      positionAttribute.setXYZ(rest, 0, -500, 0);
+    }
+    positionAttribute.needsUpdate = true;
+    colorAttribute.needsUpdate = true;
+    this.smokeParticles.visible = index > 0;
+  }
+
+  private spawnEngineSmoke(origin: THREE.Vector3, damage: number): void {
+    const intensity = Math.max(0, Math.min(1, (damage - 65) / 35));
+    if (intensity <= 0) return;
+    if (Math.random() > intensity * 0.55) return;
+    if (this.smokePuffs.length >= MAX_SMOKE_PUFFS) return;
+    this.smokePuffs.push({
+      position: origin.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.6, 0.95, 0.4)),
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 0.8,
+        1.1 + Math.random(),
+        (Math.random() - 0.5) * 0.8,
+      ),
+      ageSeconds: 0,
+      lifetimeSeconds: 1.1 + Math.random() * 0.8,
+      sizeMeters: 0.9 + intensity * 0.8,
+      color: new THREE.Color(intensity > 0.75 ? 0x222222 : 0x8a8a8a),
+    });
   }
 
   private updateWheels(wheels: GameState['cars'][number]['wheels']): void {

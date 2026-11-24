@@ -4,6 +4,7 @@ import {
   type LonLat,
   type NetworkCarState,
   type PlayerProfile,
+  type PoliceUnitState,
   type RouteFailure,
   type RouteResult,
   type WorldSnapshot,
@@ -27,6 +28,7 @@ import { RemotePlayerStore } from './remote-player-store';
 import { GameMenu } from './game-menu';
 import { loadVehicleMods } from './mod-loader';
 import { DEFAULT_GAME_SETTINGS, ProgressStore, type GameSettings } from './progress-store';
+import { WantedSystem, WANTED_LEVELS } from './wanted-system';
 import type { WorldRuntime } from './world-runtime';
 import type { MissionMarker } from './world-renderer';
 import './styles.css';
@@ -98,6 +100,13 @@ let pendingRouteLabel = '';
 const remotePlayerStore = new RemotePlayerStore();
 let frameRequestId = 0;
 const progressStore = new ProgressStore();
+const wantedSystem = new WantedSystem();
+const wantedStars = element<HTMLDivElement>('wanted-stars');
+const wantedVignette = element<HTMLDivElement>('wanted-vignette');
+let latestPursuitUnits: readonly PoliceUnitState[] = [];
+let latestPursuitWantedLevel = 0;
+let lastWantedReportAt = 0;
+let wreckedExplosionAt = 0;
 const gameMap = new GameMap(
   element('minimap'),
   () => {
@@ -181,6 +190,13 @@ function startAt(location: LonLat, label: string, status: string): void {
   accumulator = 0;
   gameMap.follow(origin, 0);
   ambientWorldStore.clear();
+  wantedSystem.reset();
+  latestPursuitUnits = [];
+  latestPursuitWantedLevel = 0;
+  wantedStars.hidden = true;
+  wantedVignette.dataset.pulse = 'false';
+  vehicleAudio.setSiren(false);
+  gameMap.setPursuit([]);
   worldStatus.textContent = 'Loading real OpenStreetMap roads…';
   pendingRouteId = null;
   runtime?.setRoute(null);
@@ -376,6 +392,36 @@ function connectMultiplayer(): void {
     onLeaderboard: (snapshot) => gameMenu.setLeaderboard(snapshot),
     onRaceCreated: (offer) => {
       gameMenu.setStatus(`Published ${offer.title}. Nearby players can now find it.`);
+    },
+    onPursuit: (message) => {
+      latestPursuitUnits = message.police;
+      latestPursuitWantedLevel = message.level;
+      wantedSystem.applyServerPursuit(message.level);
+      if (message.level > 0) {
+        statusMessage = describeWanted(message.level, message.police.length);
+      }
+    },
+    onBusted: (message) => {
+      wantedSystem.applyServerPursuit(0);
+      latestPursuitUnits = [];
+      latestPursuitWantedLevel = 0;
+      statusMessage =
+        message.fineCents > 0
+          ? `Busted — fined $${(message.fineCents / 100).toFixed(2)}. Respawn from the menu.`
+          : 'Busted. Respawn from the menu to continue.';
+      gameMenu.setStatus(statusMessage);
+    },
+    onWrecked: (message) => {
+      wantedSystem.applyServerPursuit(0);
+      latestPursuitUnits = [];
+      latestPursuitWantedLevel = 0;
+      wreckedExplosionAt = performance.now();
+      runtime?.triggerExplosion();
+      statusMessage =
+        message.repairBillCents > 0
+          ? `Wrecked — repair bill $${(message.repairBillCents / 100).toFixed(2)}. Respawn from the menu.`
+          : 'Wrecked. Respawn from the menu.';
+      gameMenu.setStatus(statusMessage);
     },
     onChat: (message) => appendChatLine(message.handle, message.text),
     onStatus: (message) => {
@@ -621,6 +667,9 @@ async function initializeWorld(): Promise<void> {
       },
     );
     publishPlayerCar(runtime.reset(readGameState().origin));
+    runtime.setImpactHandler((impactMetersPerSecond) => {
+      wantedSystem.registerCollision(impactMetersPerSecond);
+    });
     if (currentProfile?.activeMission) renderActiveMission();
     statusMessage = 'Physics ready — streaming nearby streets';
     connectMultiplayer();
@@ -666,12 +715,25 @@ function frame(now: number): void {
   }
   updateMissionProgress(location, now);
 
+  const wanted = wantedSystem.tick(
+    player.speedMetersPerSecond,
+    (player.damage ?? 0) / 100,
+    latestPursuitWantedLevel > 0 || latestPursuitUnits.length > 0,
+    delta,
+  );
+  if (wanted.wantedLevel > 0 && multiplayer && now >= lastWantedReportAt) {
+    multiplayer.sendWantedHeat(wanted.heat);
+    lastWantedReportAt = now + 500;
+  }
+  renderWantedHud(wanted.wantedLevel, wantedSystem.heat, now);
+
   if (gameMap.isLoaded()) {
     if (now >= nextStreetQueryAt) {
       streetName = gameMap.streetNameNear(location);
       nextStreetQueryAt = now + STREET_QUERY_INTERVAL_MS;
     }
     gameMap.follow(location, degreesFromRadians(player.headingRadians));
+    gameMap.setPursuit(latestPursuitUnits);
   }
   if (runtime && now >= nextChunkUpdateAt) {
     runtime.updateChunks(location);
@@ -687,6 +749,32 @@ function frame(now: number): void {
     statusMessage,
   });
   frameRequestId = requestAnimationFrame(frame);
+}
+
+function renderWantedHud(level: number, heat: number, now: number): void {
+  const stars = Math.min(level, WANTED_LEVELS);
+  if (stars <= 0) {
+    wantedStars.hidden = true;
+    wantedVignette.dataset.pulse = 'false';
+    vehicleAudio.setSiren(false);
+    return;
+  }
+  wantedStars.hidden = false;
+  wantedStars.textContent = '\u2605'.repeat(stars) + '\u2606'.repeat(WANTED_LEVELS - stars);
+  wantedStars.dataset.flash = String(stars >= 3 || heat >= 0.75);
+  wantedVignette.dataset.pulse = String(stars >= 2);
+  const sirenOn = latestPursuitUnits.length > 0 || stars >= 1;
+  vehicleAudio.setSiren(sirenOn);
+  if (stars >= 3 && now - wreckedExplosionAt > 1_000 && heat >= 0.999) {
+    wreckedExplosionAt = now;
+    runtime?.triggerExplosion();
+  }
+}
+
+function describeWanted(level: number, units: number): string {
+  const stars = Math.min(level, WANTED_LEVELS);
+  const unitLabel = units === 1 ? '1 unit' : `${units} units`;
+  return `Wanted level ${stars} — ${unitLabel} in pursuit. Lose them or find a safe spot.`;
 }
 
 void initializeWorld();

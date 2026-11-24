@@ -4,6 +4,7 @@ import type {
   LonLat,
   PlayerInput,
   Point2,
+  PoliceUnitState,
   WorldSnapshot,
 } from '@openstreet-racer/shared';
 import {
@@ -83,6 +84,18 @@ export class WorldRuntime {
 
   repair(): CarState {
     return this.vehicle.repair();
+  }
+
+  setImpactHandler(handler: ((impactMetersPerSecond: number) => void) | null): void {
+    this.vehicle.onImpact = handler;
+  }
+
+  updatePursuit(police: readonly PoliceUnitState[], origin: LonLat, wantedLevel: number): void {
+    this.renderer.updatePursuit(police, origin, wantedLevel);
+  }
+
+  triggerExplosion(): void {
+    this.renderer.triggerExplosion();
   }
 
   setGraphicsQuality(quality: 'low' | 'medium' | 'high'): void {

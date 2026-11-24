@@ -48,6 +48,11 @@ export class VehicleAudio {
   private tireGain: GainNode | null = null;
   private ambienceFilter: BiquadFilterNode | null = null;
   private ambienceGain: GainNode | null = null;
+  private sirenOscillator: OscillatorNode | null = null;
+  private sirenGain: GainNode | null = null;
+  private sirenLfo: OscillatorNode | null = null;
+  private sirenLfoGain: GainNode | null = null;
+  private sirenActive = false;
   private preferences: AudioPreferences = readPreferences();
 
   get volume(): number {
@@ -123,6 +128,24 @@ export class VehicleAudio {
     ambienceGain.connect(master);
     ambienceSource.start();
 
+    const sirenLfoGain = context.createGain();
+    sirenLfoGain.gain.value = 140;
+    const sirenLfo = context.createOscillator();
+    sirenLfo.type = 'square';
+    sirenLfo.frequency.value = 1.6;
+    sirenLfo.connect(sirenLfoGain);
+    sirenLfo.start();
+
+    const sirenGain = context.createGain();
+    sirenGain.gain.value = 0;
+    const sirenOscillator = context.createOscillator();
+    sirenOscillator.type = 'sawtooth';
+    sirenOscillator.frequency.value = 620;
+    sirenLfoGain.connect(sirenOscillator.frequency);
+    sirenOscillator.connect(sirenGain);
+    sirenGain.connect(master);
+    sirenOscillator.start();
+
     this.context = context;
     this.master = master;
     this.engine = engine;
@@ -134,6 +157,17 @@ export class VehicleAudio {
     this.tireGain = tireGain;
     this.ambienceFilter = ambienceFilter;
     this.ambienceGain = ambienceGain;
+    this.sirenOscillator = sirenOscillator;
+    this.sirenGain = sirenGain;
+    this.sirenLfo = sirenLfo;
+    this.sirenLfoGain = sirenLfoGain;
+  }
+
+  setSiren(active: boolean): void {
+    this.sirenActive = active;
+    const context = this.context;
+    if (!context || !this.sirenGain) return;
+    this.sirenGain.gain.setTargetAtTime(active ? 0.035 : 0, context.currentTime, 0.12);
   }
 
   update(car: CarState, input: PlayerInput): void {
@@ -179,6 +213,8 @@ export class VehicleAudio {
     this.engine?.stop();
     this.engineHarmonic?.stop();
     this.tireSource?.stop();
+    this.sirenLfo?.stop();
+    this.sirenOscillator?.stop();
     if (this.context) void this.context.close();
     this.context = null;
   }

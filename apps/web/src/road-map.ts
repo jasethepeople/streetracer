@@ -7,7 +7,7 @@ import {
 } from 'maplibre-gl';
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { lonLatToLocalMeters, nearestPointOnRoad } from '@openstreet-racer/world';
-import type { LonLat } from '@openstreet-racer/shared';
+import type { LonLat, PoliceUnitState } from '@openstreet-racer/shared';
 import { OPENFREEMAP_STYLE_URL } from '@openstreet-racer/shared';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
@@ -35,6 +35,7 @@ export class GameMap {
   private lastCamera: { longitude: number; latitude: number; bearing: number } | null = null;
   private lastUpdateAt = 0;
   private routePoints: readonly LonLat[] = [];
+  private pursuitUnits: readonly PoliceUnitState[] = [];
 
   constructor(container: HTMLElement, onLoad: () => void, onError: (message: string) => void) {
     const options: MapOptions = {
@@ -52,8 +53,10 @@ export class GameMap {
       this.map.resize();
       this.addRoadQueryLayer();
       this.addRouteLayer();
+      this.addPursuitLayer();
       this.loaded = true;
       this.syncRouteLayer();
+      this.syncPursuitLayer();
       onLoad();
     });
     window.addEventListener('resize', () => this.map.resize());
@@ -67,6 +70,11 @@ export class GameMap {
   setRoute(points: readonly LonLat[] | null): void {
     this.routePoints = points ?? [];
     this.syncRouteLayer();
+  }
+
+  setPursuit(units: readonly PoliceUnitState[]): void {
+    this.pursuitUnits = units;
+    this.syncPursuitLayer();
   }
 
   follow(location: LonLat, headingDegrees: number): void {
@@ -159,6 +167,31 @@ export class GameMap {
     source?.setData(routeFeature(this.routePoints));
   }
 
+  private addPursuitLayer(): void {
+    this.map.addSource('osr-pursuit', {
+      type: 'geojson',
+      data: pursuitFeature(this.pursuitUnits),
+    });
+    this.map.addLayer({
+      id: 'osr-pursuit-dots',
+      type: 'circle',
+      source: 'osr-pursuit',
+      paint: {
+        'circle-color': '#f43f5e',
+        'circle-radius': 7,
+        'circle-stroke-color': '#fecdd3',
+        'circle-stroke-width': 2,
+        'circle-opacity': 0.95,
+      },
+    });
+  }
+
+  private syncPursuitLayer(): void {
+    if (!this.loaded) return;
+    const source = this.map.getSource('osr-pursuit') as GeoJSONSource | undefined;
+    source?.setData(pursuitFeature(this.pursuitUnits));
+  }
+
   private addRoadQueryLayer(): void {
     const labelLayer = STREET_LABEL_LAYERS.find((layer) => Boolean(this.map.getLayer(layer)));
     this.map.addLayer(
@@ -199,5 +232,19 @@ function routeFeature(points: readonly LonLat[]) {
       type: 'LineString' as const,
       coordinates: points.map((point) => [point.longitude, point.latitude]),
     },
+  };
+}
+
+function pursuitFeature(units: readonly PoliceUnitState[]) {
+  return {
+    type: 'FeatureCollection' as const,
+    features: units.map((unit) => ({
+      type: 'Feature' as const,
+      properties: { id: unit.id },
+      geometry: {
+        type: 'Point' as const,
+        coordinates: [unit.position.longitude, unit.position.latitude],
+      },
+    })),
   };
 }

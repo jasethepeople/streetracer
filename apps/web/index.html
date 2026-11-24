@@ -91,6 +91,25 @@
           <button id="route-clear" class="route-clear" type="button">Clear</button>
         </div>
       </form>
+      <div
+        id="wanted-stars"
+        class="wanted-stars"
+        role="status"
+        aria-label="Wanted level"
+        hidden
+      ></div>
+      <div id="wanted-vignette" class="wanted-vignette" aria-hidden="true"></div>
+      <section
+        id="wreck-card"
+        class="wreck-card"
+        role="alertdialog"
+        aria-labelledby="wreck-title"
+        hidden
+      >
+        <h2 id="wreck-title">WASTED</h2>
+        <p id="wreck-detail">Your car was wrecked.</p>
+        <button id="wreck-respawn" type="button">Respawn</button>
+      </section>
       <section class="speed-card" aria-label="Driving status">
         <div class="speed-caption">SPEED</div>
         <div id="speed" class="speed-value">0 km/h</div>
