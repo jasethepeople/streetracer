@@ -51,6 +51,7 @@ import { loadMissionMods, loadVehicleMods } from './mod-loader';
 import {
   addWantedHeat,
   applyCooldown,
+  COOLDOWN_DECAY_PER_SECOND,
   applyImpact,
   applyRedLight,
   applySpeeding,
@@ -169,6 +170,7 @@ interface Session {
 interface SessionPursuit {
   lastEvalAtMs: number;
   lastTickAtMs: number;
+  lastCollisionAtMs: number;
   level: number;
   heat: number;
   contactSeconds: number;
@@ -209,6 +211,7 @@ function createSessionPursuit(profile: PlayerProfile): SessionPursuit {
   return {
     lastEvalAtMs: 0,
     lastTickAtMs: 0,
+    lastCollisionAtMs: 0,
     level: profile.wantedLevel,
     heat: profile.wantedHeat,
     contactSeconds: 0,
@@ -400,6 +403,9 @@ export function createGameServer(options: GameServerOptions = {}) {
         break;
       case 'impact-report':
         queueSessionAction(session, () => handleImpactReport(session, message, timestamp));
+        break;
+      case 'wanted-heat':
+        handleWantedHeat(session, message, timestamp);
         break;
     }
   }
@@ -875,8 +881,7 @@ export function createGameServer(options: GameServerOptions = {}) {
       }
       const kind = active.offer.kind;
       const forcedLevel = isHeatMission(kind) ? heatMissionStartLevel(kind) : null;
-      const missionLevel =
-        forcedLevel ?? (kind === 'lay-low' ? profile.wantedLevel : undefined);
+      const missionLevel = forcedLevel ?? (kind === 'lay-low' ? profile.wantedLevel : undefined);
       profile = await playerStore.updateProfile(
         session.anonymousPlayerId,
         (current) => ({
@@ -1151,6 +1156,25 @@ export function createGameServer(options: GameServerOptions = {}) {
     if (acceptedDamage >= 100) void wreckVehicle(session, updated, timestamp);
   }
 
+  function handleWantedHeat(
+    session: Session,
+    message: Extract<ClientMessage, { type: 'wanted-heat' }>,
+    timestamp: number,
+  ): void {
+    const pursuit = session.pursuit;
+    if (!Number.isFinite(message.heat)) return;
+    const reported = Math.max(0, Math.min(1.5, message.heat));
+    const elapsedSeconds =
+      pursuit.lastCollisionAtMs === 0
+        ? 0
+        : Math.max(0, Math.min(30, (timestamp - pursuit.lastCollisionAtMs) / 1000));
+    pursuit.lastCollisionAtMs = timestamp;
+    const gained = Math.max(0, reported - elapsedSeconds * COOLDOWN_DECAY_PER_SECOND);
+    if (gained <= 0) return;
+    const next = addWantedHeat({ level: pursuit.level, heat: pursuit.heat }, gained);
+    setSessionWanted(session, next.level, next.heat);
+  }
+
   async function handleLeaderboardRequest(
     session: Session,
     message: Extract<ClientMessage, { type: 'leaderboard-request' }>,
@@ -1232,8 +1256,7 @@ export function createGameServer(options: GameServerOptions = {}) {
     pursuit.lastEvalAtMs = timestamp;
     const car = session.car;
     const roadInfo = ambientWorld?.roadInfoAt ? ambientWorld.roadInfoAt(car.position) : null;
-    const limitMetersPerSecond =
-      roadInfo?.limitMetersPerSecond ?? DEFAULT_SPEED_LIMIT_MPS;
+    const limitMetersPerSecond = roadInfo?.limitMetersPerSecond ?? DEFAULT_SPEED_LIMIT_MPS;
     const spedUp = applySpeeding(
       { level: pursuit.level, heat: pursuit.heat },
       car.speedMetersPerSecond,
@@ -1261,7 +1284,12 @@ export function createGameServer(options: GameServerOptions = {}) {
   function sendPursuit(session: Session, timestamp: number, force: boolean): void {
     const pursuit = session.pursuit;
     if (!force && timestamp - pursuit.lastSentAtMs < PURSUIT_SEND_INTERVAL_MS) return;
-    if (!force && pursuit.level === 0 && pursuit.units.length === 0 && timestamp - pursuit.lastSentAtMs < PURSUIT_SEND_INTERVAL_MS * 4) {
+    if (
+      !force &&
+      pursuit.level === 0 &&
+      pursuit.units.length === 0 &&
+      timestamp - pursuit.lastSentAtMs < PURSUIT_SEND_INTERVAL_MS * 4
+    ) {
       return;
     }
     pursuit.lastSentAtMs = timestamp;
@@ -1321,7 +1349,8 @@ export function createGameServer(options: GameServerOptions = {}) {
   function syncPoliceFleet(session: Session, timestamp: number, elapsedSeconds: number): void {
     const pursuit = session.pursuit;
     pursuit.units = pursuit.units.filter(
-      (unit) => unit.mode !== 'disabled' || timestamp - unit.disabledAtMs < POLICE_DISABLED_LINGER_MS,
+      (unit) =>
+        unit.mode !== 'disabled' || timestamp - unit.disabledAtMs < POLICE_DISABLED_LINGER_MS,
     );
     const target = policeCountForLevel(pursuit.level);
     pursuit.units = [
@@ -1350,15 +1379,18 @@ export function createGameServer(options: GameServerOptions = {}) {
   function spawnPoliceUnit(session: Session, timestamp: number): PursuitPoliceUnit {
     const angle = Math.random() * Math.PI * 2;
     const distance =
-      POLICE_SPAWN_MIN_METERS +
-      Math.random() * (POLICE_SPAWN_MAX_METERS - POLICE_SPAWN_MIN_METERS);
+      POLICE_SPAWN_MIN_METERS + Math.random() * (POLICE_SPAWN_MAX_METERS - POLICE_SPAWN_MIN_METERS);
     const position = offsetLonLat(session.car.position, angle, distance);
     const unit = createPoliceUnit(`police-${randomUUID().slice(0, 8)}`, position, timestamp);
     void routePoliceUnit(session, unit, timestamp);
     return unit;
   }
 
-  async function routePoliceUnit(session: Session, unit: PursuitPoliceUnit, timestamp: number): Promise<void> {
+  async function routePoliceUnit(
+    session: Session,
+    unit: PursuitPoliceUnit,
+    timestamp: number,
+  ): Promise<void> {
     if (!ambientWorld) return;
     if (policeReroutesInFlight.has(unit.id)) return;
     policeReroutesInFlight.add(unit.id);
@@ -1481,7 +1513,11 @@ export function createGameServer(options: GameServerOptions = {}) {
     const car = session.car;
     let plausible = false;
     if (message.targetKind === 'police') {
-      const near = policeUnitsNear(session.pursuit.units, car.position, POLICE_IMPACT_RADIUS_METERS);
+      const near = policeUnitsNear(
+        session.pursuit.units,
+        car.position,
+        POLICE_IMPACT_RADIUS_METERS,
+      );
       let nearestUnit: PursuitPoliceUnit | null = null;
       let nearestDistance = Number.POSITIVE_INFINITY;
       for (const unit of near) {
@@ -1546,7 +1582,10 @@ export function createGameServer(options: GameServerOptions = {}) {
         syncPursuitMission(session, cleared);
         sendProgress(session, cleared);
         sendMissions(session, cleared);
-        send(session.socket, errorMessage('MISSION_TIMEOUT', 'Time ran out. Choose another mission.'));
+        send(
+          session.socket,
+          errorMessage('MISSION_TIMEOUT', 'Time ran out. Choose another mission.'),
+        );
         return;
       }
       await completeHeatMissionAction(session, mission, durationSeconds, timestamp);

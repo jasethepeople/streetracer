@@ -167,12 +167,6 @@ export type ClientMessage =
   | {
       readonly version: 1;
       readonly type: 'impact-report';
-      readonly targetKind: 'vehicle' | 'pedestrian' | 'police' | 'prop';
-      readonly hardness: number;
-    }
-  | {
-      readonly version: 1;
-      readonly type: 'impact-report';
       readonly hardness: number;
       readonly targetKind: ImpactTargetKind;
     }
@@ -182,7 +176,8 @@ export type ClientMessage =
       readonly title: string;
       readonly destination: Readonly<LonLat>;
       readonly waypoints?: readonly Readonly<LonLat>[];
-    };
+    }
+  | { readonly version: 1; readonly type: 'wanted-heat'; readonly heat: number };
 
 export type ServerMessage =
   | {
