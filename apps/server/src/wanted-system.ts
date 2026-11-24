@@ -329,6 +329,10 @@ export function bustedContactUpdate(
   return { contactSeconds: updated, busted: updated >= BUSTED_CONTACT_SECONDS };
 }
 
+export function isActiveHeatMissionKind(kind: string): boolean {
+  return kind === 'getaway' || kind === 'hot-delivery' || kind === 'lay-low';
+}
+
 export function bustedFineCents(balanceCents: number): number {
   const balance = Math.max(0, Math.floor(balanceCents));
   if (balance === 0) return 0;
