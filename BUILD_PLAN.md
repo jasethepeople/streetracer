@@ -153,6 +153,17 @@
 
 **Status:** Mission mods load from the same folder layout as vehicle mods; rules run in `packages/game/src/mod-script.ts` (a ~380-line interpreter with 4,000-step, depth-48, 512-character caps and no loops, closures, or property access), so scripts cannot reach the network, storage, or the DOM by construction, and the server clamps every script result before use. The Build tab drops checkpoints at the car's position and publishes waypoint courses through the existing validated race pipeline. A combined sample mod (`apps/web/public/mods/sample-rally/`) ships one vehicle plus two scripted missions, and every published race still lands on the same server-side leaderboard as in Phase 5. Translation is a documented two-language string table awaiting a third column.
 
+### Phase 7: Wanted system and police pursuit
+
+- [x] Server-authoritative heat: speeding above the road's OSM limit, red-light running, and hard impacts each raise heat; heat carries into 0–5 wanted stars, persisted with the player profile
+- [x] Police pursuit AI: units spawn 220–420 m away per star, chase on the road graph, roadblocks form at 4+ stars ahead of the player's route, rams deal damage both ways, disabled units linger then despawn
+- [x] Busted and wrecked flow: 3 s of police contact while wanted busts you (fine capped at 15% of balance), 100% damage wrecks you (repair bill at 25 cents/damage); both respawn you and clear heat
+- [x] Heat missions: getaway, hot-delivery, and lay-low offers generated from wanted state, with hidden cooldown multipliers and hideout destinations
+- [x] Client mirror: wanted-stars HUD with flash/vignette, procedural two-tone siren, police cars in 3D and on the minimap, heat reported to the server (rate-limited and clamped), spark explosion at full heat
+- [ ] Physical-phone check of pursuit performance (police cars + traffic + city geometry at 60 FPS)
+
+**Status:** The server owns the truth: it evaluates speed/red-light/impact heat on a bounded tick, spawns and advances police units along the road graph, and emits `pursuit`, `busted`, and `wrecked` messages. The client only mirrors heat for a responsive HUD and reports collisions back, which the server clamps — a hacked client cannot grant itself stars. 128 automated tests cover the rules; lint, build, and typecheck are clean.
+
 ---
 
 ## 5. Key Technical Risks
@@ -187,10 +198,10 @@
 
 ## What's next
 
-The core loop is in: real 3D OSM streets, traffic and pedestrians, missions that pay credits, a garage with purchasable vehicles, damage and repairs, community street races publishable from your own street, folder-loaded vehicle mods, and multiplayer with chat and shared ambient world. The next priorities, in order:
+The core loop is in: real 3D OSM streets, traffic and pedestrians, missions that pay credits, a garage with purchasable vehicles, damage and repairs, community street races publishable from your own street, folder-loaded vehicle mods, multiplayer with chat and shared ambient world, and a full wanted/police system with busted, wrecked, and heat-mission flows. The next priorities, in order:
 
 1. **Real-device verification.** Confirm 60 FPS and hitch-free chunk streaming on a physical mid-range phone; the available browser only offers SwiftShader software rendering.
-2. **Production hardening before public play.** Move player profiles and community races from single-process JSON files to a transactional shared database, switch the OSM source to a production-grade one (the current Overpass usage is fine for development but unsuitable for a busy public server), deploy behind HTTPS/WSS, and set `ALLOWED_ORIGINS`.
-3. **Deeper community content.** Player-placed props and ramps, and vote-based moderation (report + hide-by-default + admin tools) over published races. Mission and script mods exist; more script hooks (custom objective logic, per-mission rules) are the natural extension.
-4. **Federation.** Implement the directory service sketched in `docs/FEDERATION.md`, starting with an in-game server URL field (today only the build-time `VITE_MULTIPLAYER_URL` override exists) and a reconnect flow.
-5. **Third language.** The menu string table is translation-ready; add a real third locale to prove the flow documented in CONTRIBUTING.md.
+2. **Pursuit playtesting.** Tune star escalation and police speed on real streets — the constants live at the top of `apps/server/src/wanted-system.ts` and were reasoned out, not playtested. Verify the busted/fine economy feels fair alongside mission rewards.
+3. **Production hardening before public play.** Move player profiles and community races from single-process JSON files to a transactional shared database, switch the OSM source to a production-grade one (the current Overpass usage is fine for development but unsuitable for a busy public server), deploy behind HTTPS/WSS, and set `ALLOWED_ORIGINS`.
+4. **Deeper community content.** Player-placed props and ramps, and vote-based moderation (report + hide-by-default + admin tools) over published races. Mission and script mods exist; more script hooks (custom objective logic, per-mission rules) are the natural extension.
+5. **Federation.** Implement the directory service sketched in `docs/FEDERATION.md`, starting with an in-game server URL field (today only the build-time `VITE_MULTIPLAYER_URL` override exists) and a reconnect flow.
