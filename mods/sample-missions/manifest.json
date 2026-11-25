@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "sample-missions",
+  "name": "Sample Missions",
+  "version": "1.0.0",
+  "description": "Two tutorial missions that show the mod format, including a sandboxed reward rule.",
+  "missions": [
+    {
+      "id": "market-run",
+      "kind": "delivery",
+      "title": "Market run",
+      "rewardCents": 800,
+      "timeMultiplier": 1,
+      "placeCategories": ["shop"],
+      "rules": {
+        "rewardMultiplier": "(if (> distance 2000) 1.5 1)"
+      }
+    },
+    {
+      "id": "green-tour",
+      "kind": "checkpoint-race",
+      "title": "Green tour",
+      "rewardCents": 1200,
+      "timeMultiplier": 1.2,
+      "placeCategories": ["park", "attraction"]
+    }
+  ]
+}
