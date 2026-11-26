@@ -156,8 +156,16 @@ export function createChunkGeometry(
       continue;
     }
 
-    const target = feature.layer === 'water' ? meshes.waters : meshes.greens;
-    const height = feature.layer === 'water' ? -0.055 : -0.085;
+    // Paved transportation areas (plazas, pedestrian streets) belong to the
+    // asphalt mesh, not the green-space mesh; otherwise they render as grass.
+    const target =
+      feature.layer === 'water'
+        ? meshes.waters
+        : feature.layer === 'transportation'
+          ? meshes.roads
+          : meshes.greens;
+    const height =
+      feature.layer === 'water' ? -0.055 : feature.layer === 'transportation' ? -0.045 : -0.085;
     for (const polygon of polygons) {
       const positionsBefore = target.positions.length;
       const indicesBefore = target.indices.length;

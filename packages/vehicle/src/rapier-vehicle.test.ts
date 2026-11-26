@@ -64,6 +64,58 @@ describe('Rapier raycast vehicle', () => {
     expect(vehicle.chunkCount).toBe(1);
   });
 
+  it('drives forward under full throttle from a standstill', async () => {
+    vehicle?.dispose();
+    vehicle = await RapierVehicle.create(origin.center);
+    let pose = vehicle.snapshot();
+    for (let index = 0; index < 240; index += 1) pose = vehicle.step(throttle, 1 / 60);
+    // Heading 0 faces +y (north): forward throttle must produce forward motion.
+    expect(pose.speedMetersPerSecond).toBeGreaterThan(12);
+    expect(pose.velocity.y).toBeGreaterThan(10);
+    expect(pose.position.y).toBeGreaterThan(25);
+    expect(Math.abs(pose.position.x)).toBeLessThan(2);
+  });
+
+  it('spins the wheels with limited initial movement on a hard launch', async () => {
+    vehicle?.dispose();
+    vehicle = await RapierVehicle.create(origin.center);
+    let pose = vehicle.snapshot();
+    let peakBurnout = 0;
+    let peakWheelSpin = 0;
+    for (let index = 0; index < 30; index += 1) {
+      pose = vehicle.step(throttle, 1 / 60);
+      const traction = vehicle.traction();
+      peakBurnout = Math.max(peakBurnout, traction.burnout);
+      peakWheelSpin = Math.max(peakWheelSpin, traction.wheelSpinRadiansPerSecond);
+    }
+    expect(peakBurnout).toBeGreaterThan(0.5);
+    expect(peakWheelSpin).toBeGreaterThan(10);
+    // Wheels spin but the car barely moves during the burnout phase.
+    expect(Math.abs(pose.speedMetersPerSecond)).toBeLessThan(3);
+    expect(Math.hypot(pose.position.x, pose.position.y)).toBeLessThan(2);
+    // Once the tires hook up the car accelerates hard.
+    for (let index = 0; index < 210; index += 1) pose = vehicle.step(throttle, 1 / 60);
+    expect(pose.speedMetersPerSecond).toBeGreaterThan(12);
+  });
+
+  it('slides with the handbrake and reports slip for smoke and screech', async () => {
+    vehicle?.dispose();
+    vehicle = await RapierVehicle.create(origin.center);
+    let pose = vehicle.snapshot();
+    for (let index = 0; index < 240; index += 1) pose = vehicle.step(throttle, 1 / 60);
+    expect(pose.speedMetersPerSecond).toBeGreaterThan(10);
+    let sliding = false;
+    let peakSlip = 0;
+    for (let index = 0; index < 45; index += 1) {
+      vehicle.step({ steer: 0.6, throttle: 0, brake: 0, handbrake: 1 }, 1 / 60);
+      const traction = vehicle.traction();
+      sliding = sliding || traction.sliding;
+      peakSlip = Math.max(peakSlip, traction.slipAmount);
+    }
+    expect(sliding).toBe(true);
+    expect(peakSlip).toBeGreaterThan(0.3);
+  });
+
   it('switches to an owned vehicle shape and keeps damage repairable', async () => {
     vehicle?.dispose();
     vehicle = await RapierVehicle.create(origin.center);

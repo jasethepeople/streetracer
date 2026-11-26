@@ -1143,6 +1143,29 @@ body[data-control-mode='touch'] .controls-help {
 .wanted-stars[data-flash='true'] {
   animation: wanted-flash 0.9s ease-in-out infinite;
 }
+/* Visible chase-state label under the stars, fed by data-chase-label. */
+.wanted-stars::after {
+  content: attr(data-chase-label);
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-align: right;
+  text-transform: uppercase;
+  color: #ffb84d;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+.wanted-stars[data-chase='chase']::after {
+  color: #ff5340;
+}
+.wanted-stars[data-chase='clear']::after,
+.wanted-stars[hidden]::after {
+  content: none;
+}
+.wanted-stars[data-siren='true']::after {
+  animation: wanted-flash 0.9s ease-in-out infinite;
+}
 @keyframes wanted-flash {
   0%,
   100% {
@@ -1172,6 +1195,9 @@ body[data-control-mode='touch'] .controls-help {
   50% {
     opacity: 1;
   }
+}
+.wreck-card[hidden] {
+  display: none;
 }
 .wreck-card {
   position: fixed;

@@ -30,4 +30,35 @@ describe('procedural vehicle audio', () => {
 
     expect(sliding.tireGain).toBeGreaterThan(straight.tireGain);
   });
+
+  it('screeches and revs during a burnout even at a standstill', () => {
+    const idle = vehicleAudioLevels(car(0, 0), { ...noInput, throttle: 1 });
+    const burnout = vehicleAudioLevels(
+      car(0, 0),
+      { ...noInput, throttle: 1 },
+      {
+        burnout: 1,
+        sliding: false,
+        slipAmount: 0,
+      },
+    );
+
+    expect(burnout.tireGain).toBeGreaterThan(idle.tireGain);
+    expect(burnout.engineFrequencyHz).toBeGreaterThan(idle.engineFrequencyHz);
+  });
+
+  it('screeches when the physics reports a slide', () => {
+    const straight = vehicleAudioLevels(car(0, 10), noInput, {
+      burnout: 0,
+      sliding: false,
+      slipAmount: 0,
+    });
+    const drifting = vehicleAudioLevels(car(0, 10), noInput, {
+      burnout: 0,
+      sliding: true,
+      slipAmount: 0.8,
+    });
+
+    expect(drifting.tireGain).toBeGreaterThan(straight.tireGain);
+  });
 });

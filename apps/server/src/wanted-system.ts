@@ -12,6 +12,16 @@ export const RED_LIGHT_HEAT = 0.5;
 export const RED_LIGHT_RADIUS_METERS = 14;
 export const RED_LIGHT_MIN_SPEED_MPS = 2;
 export const IMPACT_MIN_HARDNESS = 25;
+export const NEAR_MISS_MIN_CLOSING_SPEED_MPS = 6;
+export const NEAR_MISS_MAX_CLOSING_SPEED_MPS = 30;
+export const NEAR_MISS_MIN_HEAT = 0.08;
+export const NEAR_MISS_MAX_HEAT = 0.3;
+// Detection gates (evaluateNearMisses in index.ts): an ordinary opposing-lane
+// pass sits ~3.5 m off the player's line, so the radius must stay below lane
+// separation, and the player must be driving fast enough for the pass to be
+// reckless rather than parking-lot shuffle.
+export const NEAR_MISS_RADIUS_METERS = 3;
+export const NEAR_MISS_MIN_PLAYER_SPEED_MPS = 8;
 export const COOLDOWN_DECAY_PER_SECOND = 0.03;
 export const BUSTED_CONTACT_SECONDS = 3;
 export const BUSTED_CONTACT_SPEED_MPS = 3.5;
@@ -109,6 +119,33 @@ export function applyImpact(
 
 export function applyRedLight(state: WantedState): WantedState {
   return addWantedHeat(state, RED_LIGHT_HEAT);
+}
+
+/**
+ * Reckless near-miss: brushing past another vehicle at a high closing speed
+ * adds heat scaled from NEAR_MISS_MIN_HEAT (at 6 m/s closing) up to
+ * NEAR_MISS_MAX_HEAT (at 30+ m/s closing). Slow brushes below 6 m/s are
+ * ignored so normal city driving and parking bumps stay heat-free.
+ */
+export function applyNearMiss(
+  state: WantedState,
+  closingSpeedMetersPerSecond: number,
+): WantedState {
+  if (
+    !Number.isFinite(closingSpeedMetersPerSecond) ||
+    closingSpeedMetersPerSecond < NEAR_MISS_MIN_CLOSING_SPEED_MPS
+  ) {
+    return state;
+  }
+  const span = NEAR_MISS_MAX_CLOSING_SPEED_MPS - NEAR_MISS_MIN_CLOSING_SPEED_MPS;
+  const scaled = Math.min(
+    1,
+    (closingSpeedMetersPerSecond - NEAR_MISS_MIN_CLOSING_SPEED_MPS) / span,
+  );
+  return addWantedHeat(
+    state,
+    NEAR_MISS_MIN_HEAT + (NEAR_MISS_MAX_HEAT - NEAR_MISS_MIN_HEAT) * scaled,
+  );
 }
 
 export function applyCooldown(
@@ -300,6 +337,10 @@ export function offsetLonLat(
   };
 }
 
+export function shouldDeployRoadblock(level: number): boolean {
+  return Number.isFinite(level) && Math.floor(level) >= ROADBLOCK_MIN_LEVEL;
+}
+
 export function roadblockAnchor(
   routePoints: readonly LonLat[],
   spacingMeters = ROADBLOCK_SPACING_METERS,
@@ -420,4 +461,91 @@ export function roadblockUnitsFromRoute(
     unit.speedMetersPerSecond = 0;
     return unit;
   });
+}
+
+export type PursuitStatus = 'clear' | 'chase' | 'roadblock' | 'evading';
+
+/**
+ * Summarises the pursuit for HUD/telemetry:
+ * - `clear` when there is no wanted level,
+ * - `roadblock` when any deployed unit is manning a roadblock,
+ * - `chase` when at least one active unit currently sees the player,
+ * - `evading` otherwise (wanted, but line of sight is broken).
+ */
+export function pursuitStatus(
+  level: number,
+  units: readonly PursuitPoliceUnit[],
+  visible: boolean,
+): PursuitStatus {
+  if (!Number.isFinite(level) || level <= 0) return 'clear';
+  const active = units.filter((unit) => unit.mode !== 'disabled');
+  if (active.some((unit) => unit.mode === 'roadblock')) return 'roadblock';
+  if (visible && active.length > 0) return 'chase';
+  return 'evading';
+}
+
+export const POLICE_SIREN_RADIUS_METERS = 250;
+
+/**
+ * Whether the player can hear a police siren: any active (non-disabled) unit
+ * within the audible radius, which defaults to POLICE_SIREN_RADIUS_METERS.
+ */
+export function policeSirenAudible(
+  playerPosition: Readonly<LonLat>,
+  units: readonly PursuitPoliceUnit[],
+  radiusMeters = POLICE_SIREN_RADIUS_METERS,
+): boolean {
+  const radius = Number.isFinite(radiusMeters) && radiusMeters > 0 ? radiusMeters : 0;
+  return units.some(
+    (unit) => unit.mode !== 'disabled' && haversineMeters(playerPosition, unit.position) <= radius,
+  );
+}
+
+export const ESCAPE_HIDDEN_SECONDS = 8;
+export const ESCAPE_DISTANCE_METERS = 350;
+export const ESCAPE_DISTANCE_SECONDS = 3;
+
+export interface EscapeState {
+  readonly escaped: boolean;
+  readonly hiddenSeconds: number;
+  readonly separatedSeconds: number;
+}
+
+export interface EscapeUpdate {
+  readonly visible: boolean;
+  /** Distance to the nearest active unit; pass Infinity/NaN when no units remain. */
+  readonly nearestUnitMeters: number;
+  readonly elapsedSeconds: number;
+}
+
+export function createEscapeState(): EscapeState {
+  return { escaped: false, hiddenSeconds: 0, separatedSeconds: 0 };
+}
+
+/**
+ * Escape rules: the player escapes after staying out of police line of sight
+ * for ESCAPE_HIDDEN_SECONDS, or after keeping at least ESCAPE_DISTANCE_METERS
+ * of separation for ESCAPE_DISTANCE_SECONDS. With no active units the nearest
+ * distance is effectively infinite, so the separation timer runs. Once
+ * escaped the state sticks while the player stays hidden, but a unit that
+ * regains line of sight re-engages the pursuit and clears the escape.
+ */
+export function updateEscape(state: EscapeState, update: EscapeUpdate): EscapeState {
+  if (state.escaped) {
+    if (!update.visible) return state;
+    return { escaped: false, hiddenSeconds: 0, separatedSeconds: 0 };
+  }
+  const dt = Math.max(
+    0,
+    Math.min(30, Number.isFinite(update.elapsedSeconds) ? update.elapsedSeconds : 0),
+  );
+  const nearest =
+    Number.isFinite(update.nearestUnitMeters) && update.nearestUnitMeters >= 0
+      ? update.nearestUnitMeters
+      : Number.POSITIVE_INFINITY;
+  const hiddenSeconds = update.visible ? 0 : state.hiddenSeconds + dt;
+  const separatedSeconds = nearest >= ESCAPE_DISTANCE_METERS ? state.separatedSeconds + dt : 0;
+  const escaped =
+    hiddenSeconds >= ESCAPE_HIDDEN_SECONDS || separatedSeconds >= ESCAPE_DISTANCE_SECONDS;
+  return { escaped, hiddenSeconds, separatedSeconds };
 }

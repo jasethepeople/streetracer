@@ -11,7 +11,8 @@ import {
 } from '@openstreet-racer/shared';
 import type { ChunkGeometry, TileCell } from '@openstreet-racer/world';
 import { lonLatToLocalMeters } from '@openstreet-racer/world';
-import { getVehicleDefinition } from '@openstreet-racer/vehicle/catalog';
+import { getVehicleDefinition, type VehicleDefinition } from '@openstreet-racer/vehicle/catalog';
+import type { TractionState } from '@openstreet-racer/vehicle/rapier';
 import type { ChunkSink } from './chunk-streamer';
 import type { RemotePlayerRenderState } from './remote-player-store';
 
@@ -59,15 +60,6 @@ interface PoliceCarView {
   heading: number;
 }
 
-interface Puff {
-  position: THREE.Vector3;
-  velocity: THREE.Vector3;
-  ageSeconds: number;
-  lifetimeSeconds: number;
-  sizeMeters: number;
-  color: THREE.Color;
-}
-
 interface MissionMarkerView {
   readonly group: THREE.Group;
   readonly location: Readonly<LonLat>;
@@ -82,12 +74,13 @@ interface PoliceCarView {
   heading: number;
 }
 
+// A single billboarded point sprite. All puffs share the fixed
+// PointsMaterial size, so per-particle size is intentionally not tracked.
 interface Puff {
   position: THREE.Vector3;
   velocity: THREE.Vector3;
   ageSeconds: number;
   lifetimeSeconds: number;
-  sizeMeters: number;
   color: THREE.Color;
 }
 
@@ -101,12 +94,20 @@ const POLICE_LIGHT_FLASH_HZ = 2.4;
 const MAX_SMOKE_PUFFS = 90;
 const MAX_EXPLOSION_SPARKS = 60;
 const SIREN_SIGHT_METERS = 1_000;
+// Tire/engine smoke emission tuning (see planSmokeEmission / engineSmokeIntensity).
+const BURNOUT_SMOKE_THRESHOLD = 0.12;
+const SLIP_SMOKE_THRESHOLD = 0.28;
+const DRIFT_SMOKE_THRESHOLD = 0.55;
+const DRIFT_FRONT_INTENSITY_FACTOR = 0.7;
+const ENGINE_SMOKE_DAMAGE_FLOOR = 65;
+const ENGINE_SMOKE_DAMAGE_RANGE = 35;
+const TIRE_SMOKE_PUFFS_PER_SECOND = 26;
 
 const COLORS = {
   skyDay: new THREE.Color('#94c9e3'),
   skyNight: new THREE.Color('#091322'),
   ground: new THREE.MeshStandardMaterial({
-    color: '#747b62',
+    color: '#607f4f',
     roughness: 1,
     side: THREE.DoubleSide,
   }),
@@ -132,6 +133,62 @@ const COLORS = {
     side: THREE.DoubleSide,
   }),
 };
+
+/**
+ * Surface-to-material bindings for streamed world chunks. Roads must stay on the
+ * dark asphalt material while ground and green spaces stay on grass-green
+ * materials; `WorldRenderer.addChunk` applies exactly this table.
+ */
+export const CHUNK_SURFACE_MATERIALS = [
+  ['ground', () => COLORS.ground],
+  ['greens', () => COLORS.green],
+  ['waters', () => COLORS.water],
+  ['roads', () => COLORS.road],
+  ['markings', () => COLORS.markings],
+  ['buildings', () => COLORS.building],
+] as const;
+
+export type ChunkSurfaceKey = (typeof CHUNK_SURFACE_MATERIALS)[number][0];
+
+export interface TireSmokeSource {
+  readonly axle: 'front' | 'rear';
+  readonly intensity: number;
+}
+
+export interface SmokeEmissionPlan {
+  readonly tires: readonly TireSmokeSource[];
+  /** 0..1 engine smoke intensity derived from vehicle damage. */
+  readonly engineIntensity: number;
+}
+
+/** 0..1 engine smoke intensity: nothing at damage <= 65, full smoke at 100. */
+export function engineSmokeIntensity(damage: number): number {
+  return clamp((damage - ENGINE_SMOKE_DAMAGE_FLOOR) / ENGINE_SMOKE_DAMAGE_RANGE, 0, 1);
+}
+
+/**
+ * Pure, WebGL-free smoke decision: which axles emit tire smoke and how
+ * strongly, plus the engine smoke intensity, from the vehicle traction state
+ * and damage. Burnout spins the rear tires; sliding/drifting adds slip-based
+ * rear smoke, and a hard drift also smokes the front tires.
+ */
+export function planSmokeEmission(
+  traction: Readonly<TractionState> | null,
+  damage: number,
+): SmokeEmissionPlan {
+  const burnout = clamp(traction?.burnout ?? 0, 0, 1);
+  const sliding = Boolean(traction?.sliding);
+  const slip = clamp(traction?.slipAmount ?? 0, 0, 1);
+  let rearIntensity = 0;
+  if (burnout >= BURNOUT_SMOKE_THRESHOLD) rearIntensity = burnout;
+  if (sliding && slip >= SLIP_SMOKE_THRESHOLD) rearIntensity = Math.max(rearIntensity, slip);
+  const tires: TireSmokeSource[] = [];
+  if (rearIntensity > 0) tires.push({ axle: 'rear', intensity: rearIntensity });
+  if (sliding && slip >= DRIFT_SMOKE_THRESHOLD) {
+    tires.push({ axle: 'front', intensity: DRIFT_FRONT_INTENSITY_FACTOR * slip });
+  }
+  return { tires, engineIntensity: engineSmokeIntensity(damage) };
+}
 
 export class WorldRenderer implements ChunkSink {
   private readonly scene = new THREE.Scene();
@@ -168,6 +225,10 @@ export class WorldRenderer implements ChunkSink {
   private readonly smokeParticles: THREE.Points;
   private readonly smokePuffs: Puff[] = [];
   private readonly sparkPuffs: Puff[] = [];
+  private readonly tireSmokeAccumulators: Record<'front' | 'rear', number> = {
+    front: 0,
+    rear: 0,
+  };
   private explosionActiveUntil = 0;
   private readonly ambientActors = new Map<string, AmbientActorView>();
   private readonly trafficControls = new Map<string, TrafficControlView>();
@@ -237,6 +298,10 @@ export class WorldRenderer implements ChunkSink {
       WorldRenderer.createPuffMaterial(),
     );
     this.smokeParticles.frustumCulled = false;
+    // Hidden until updateParticles() has live puffs; the geometry initializes
+    // every point at the world origin with a black vertex color, which renders
+    // as a stray black square on the ground if the points cloud is visible.
+    this.smokeParticles.visible = false;
     this.scene.add(this.smokeParticles);
     this.scene.fog = new THREE.Fog(COLORS.skyDay, 900, 2_650);
     this.sun.position.set(-250, 600, -350);
@@ -328,12 +393,9 @@ export class WorldRenderer implements ChunkSink {
   addChunk(cell: TileCell, geometry: ChunkGeometry): void {
     this.removeChunk(cell.key);
     const group = new THREE.Group();
-    this.addSurface(group, geometry.ground, COLORS.ground);
-    this.addSurface(group, geometry.greens, COLORS.green);
-    this.addSurface(group, geometry.waters, COLORS.water);
-    this.addSurface(group, geometry.roads, COLORS.road);
-    this.addSurface(group, geometry.markings, COLORS.markings);
-    this.addSurface(group, geometry.buildings, COLORS.building);
+    for (const [surface, material] of CHUNK_SURFACE_MATERIALS) {
+      this.addSurface(group, geometry[surface], material(), surface);
+    }
     const chunk = { cell, group };
     this.positionChunk(chunk);
     this.world.add(group);
@@ -413,6 +475,7 @@ export class WorldRenderer implements ChunkSink {
     elapsedSeconds: number,
     deltaSeconds: number,
     remotePlayers: readonly RemotePlayerRenderState[] = [],
+    traction: Readonly<TractionState> | null = null,
   ): void {
     const player = state.cars[0];
     this.updateRouteGeometry();
@@ -437,6 +500,7 @@ export class WorldRenderer implements ChunkSink {
     this.camera.lookAt(lookAtTarget);
     this.updateRemotePlayers(remotePlayers, state);
     this.updateDayNight(elapsedSeconds, target);
+    this.updateEffects(deltaSeconds, traction, player.damage ?? 0, elapsedSeconds);
     this.renderer.render(this.scene, this.camera);
     this.updateDebugOverlay();
   }
@@ -492,6 +556,7 @@ export class WorldRenderer implements ChunkSink {
     group: THREE.Group,
     data: ChunkGeometry['ground'],
     material: THREE.Material,
+    name = '',
   ): void {
     if (!data.indices.length || !data.positions.length) return;
     const geometry = new THREE.BufferGeometry();
@@ -499,6 +564,7 @@ export class WorldRenderer implements ChunkSink {
     geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
     geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
     const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = name;
     mesh.matrixAutoUpdate = false;
     mesh.updateMatrix();
     group.add(mesh);
@@ -967,7 +1033,6 @@ export class WorldRenderer implements ChunkSink {
         ),
         ageSeconds: 0,
         lifetimeSeconds: 0.7 + Math.random() * 0.7,
-        sizeMeters: 0.5 + Math.random() * 0.9,
         color: new THREE.Color().setHSL(0.06 + Math.random() * 0.06, 0.95, 0.55),
       });
     }
@@ -1025,6 +1090,73 @@ export class WorldRenderer implements ChunkSink {
     return { group, lightRed, lightBlue, targetX: 0, targetZ: 0, heading: 0 };
   }
 
+  private updateEffects(
+    deltaSeconds: number,
+    traction: Readonly<TractionState> | null,
+    damage: number,
+    elapsedSeconds: number,
+  ): void {
+    const delta = Math.max(0, deltaSeconds);
+    const plan = planSmokeEmission(traction, damage);
+    const definition = getVehicleDefinition(this.carVehicleId);
+    // Frame-rate independent emission: accumulate fractional puffs per axle at
+    // TIRE_SMOKE_PUFFS_PER_SECOND * intensity per tire and spawn whole puffs.
+    for (const axle of ['rear', 'front'] as const) {
+      const source = plan.tires.find((tire) => tire.axle === axle);
+      if (!source) {
+        this.tireSmokeAccumulators[axle] = 0;
+        continue;
+      }
+      const tireCount = definition.visual === 'motorbike' ? 1 : 2;
+      this.tireSmokeAccumulators[axle] +=
+        TIRE_SMOKE_PUFFS_PER_SECOND * source.intensity * tireCount * delta;
+      while (this.tireSmokeAccumulators[axle] >= 1) {
+        this.tireSmokeAccumulators[axle] -= 1;
+        this.spawnTireSmoke(axle, source.intensity, definition);
+      }
+    }
+    if (plan.engineIntensity > 0) {
+      const hoodOffset = new THREE.Vector3(
+        0,
+        0.35,
+        definition.dimensions.length * 0.32,
+      ).applyQuaternion(this.car.quaternion);
+      this.spawnEngineSmoke(this.car.position.clone().add(hoodOffset), damage);
+    }
+    this.updatePoliceCars(deltaSeconds, elapsedSeconds);
+    this.updateParticles(deltaSeconds);
+  }
+
+  private spawnTireSmoke(
+    axle: 'front' | 'rear',
+    intensity: number,
+    definition: VehicleDefinition,
+  ): void {
+    if (this.smokePuffs.length >= MAX_SMOKE_PUFFS) return;
+    const { track, wheelbase, wheelRadius } = definition.dimensions;
+    // Emit at the actual wheel positions from the active vehicle definition,
+    // rotated into world space by the car's orientation.
+    const side = Math.random() < 0.5 ? -1 : 1;
+    const lateral = definition.visual === 'motorbike' ? 0 : side * track * 0.5;
+    const longitudinal = (axle === 'front' ? 1 : -1) * wheelbase * 0.5;
+    const offset = new THREE.Vector3(lateral, wheelRadius * 0.5, longitudinal).applyQuaternion(
+      this.car.quaternion,
+    );
+    // Light gray to near-white tire smoke.
+    const shade = 0.72 + Math.random() * 0.2;
+    this.smokePuffs.push({
+      position: this.car.position.clone().add(offset),
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 1.4,
+        0.5 + Math.random() * (0.6 + intensity),
+        (Math.random() - 0.5) * 1.4,
+      ),
+      ageSeconds: 0,
+      lifetimeSeconds: 0.7 + Math.random() * 1.1,
+      color: new THREE.Color(shade, shade, shade),
+    });
+  }
+
   private updatePoliceCars(deltaSeconds: number, elapsedSeconds: number): void {
     const blend = 1 - Math.exp(-Math.max(0, deltaSeconds) * 4.5);
     const flashPhase = Math.sin(elapsedSeconds * Math.PI * 2 * POLICE_LIGHT_FLASH_HZ) >= 0;
@@ -1079,7 +1211,7 @@ export class WorldRenderer implements ChunkSink {
   }
 
   private spawnEngineSmoke(origin: THREE.Vector3, damage: number): void {
-    const intensity = Math.max(0, Math.min(1, (damage - 65) / 35));
+    const intensity = engineSmokeIntensity(damage);
     if (intensity <= 0) return;
     if (Math.random() > intensity * 0.55) return;
     if (this.smokePuffs.length >= MAX_SMOKE_PUFFS) return;
@@ -1092,7 +1224,6 @@ export class WorldRenderer implements ChunkSink {
       ),
       ageSeconds: 0,
       lifetimeSeconds: 1.1 + Math.random() * 0.8,
-      sizeMeters: 0.9 + intensity * 0.8,
       color: new THREE.Color(intensity > 0.75 ? 0x222222 : 0x8a8a8a),
     });
   }

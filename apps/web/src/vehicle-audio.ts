@@ -15,9 +15,16 @@ export interface VehicleAudioLevels {
   readonly ambienceGain: number;
 }
 
+export interface VehicleAudioTraction {
+  readonly burnout: number;
+  readonly sliding: boolean;
+  readonly slipAmount: number;
+}
+
 export function vehicleAudioLevels(
   car: Pick<CarState, 'velocity' | 'headingRadians'>,
   input: PlayerInput,
+  traction: VehicleAudioTraction | null = null,
 ): VehicleAudioLevels {
   const forwardSpeed = Math.max(
     0,
@@ -25,12 +32,18 @@ export function vehicleAudioLevels(
   );
   const lateralSpeed =
     car.velocity.x * Math.cos(car.headingRadians) - car.velocity.y * Math.sin(car.headingRadians);
-  const slip = Math.min(1, Math.abs(lateralSpeed) / Math.max(4, forwardSpeed * 0.3));
-  const engineFrequencyHz = 58 + Math.min(forwardSpeed, 38) * 6.4 + input.throttle * 26;
+  const geometricSlip = Math.min(1, Math.abs(lateralSpeed) / Math.max(4, forwardSpeed * 0.3));
+  const slip = traction ? Math.max(geometricSlip, clamp(traction.slipAmount, 0, 1)) : geometricSlip;
+  const burnout = traction ? clamp(traction.burnout, 0, 1) : 0;
+  // A burnout revs the engine hard even though the car is barely moving.
+  const engineFrequencyHz =
+    58 + Math.min(forwardSpeed, 38) * 6.4 + input.throttle * (26 + burnout * 58);
   const engineGain = Math.min(0.12, 0.012 + forwardSpeed * 0.0015 + input.throttle * 0.035);
+  // Screech: wheelspin at standstill and lateral slides both light up the tires.
+  const screech = Math.max(slip * forwardSpeed, burnout * 14);
   const tireGain = Math.min(
-    0.045,
-    forwardSpeed * (0.00035 + slip * 0.0018) + input.handbrake * 0.012,
+    0.06,
+    forwardSpeed * 0.00035 + screech * 0.0018 + input.handbrake * 0.012 + burnout * 0.02,
   );
   const ambienceGain = Math.min(0.012, 0.002 + forwardSpeed * 0.00018);
   return { engineFrequencyHz, engineGain, tireGain, ambienceGain };
@@ -170,11 +183,11 @@ export class VehicleAudio {
     this.sirenGain.gain.setTargetAtTime(active ? 0.035 : 0, context.currentTime, 0.12);
   }
 
-  update(car: CarState, input: PlayerInput): void {
+  update(car: CarState, input: PlayerInput, traction: VehicleAudioTraction | null = null): void {
     const context = this.context;
     if (!context || !this.engine || !this.engineHarmonic || !this.engineFilter) return;
     if (context.state === 'suspended') void context.resume();
-    const levels = vehicleAudioLevels(car, input);
+    const levels = vehicleAudioLevels(car, input, traction);
     const now = context.currentTime;
     const forwardSpeed = Math.max(
       0,

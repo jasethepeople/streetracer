@@ -96,6 +96,46 @@ describe('chunk geometry', () => {
     expect(heights(first)).toEqual(heights(second));
   });
 
+  it('routes road lines and paved areas to the roads mesh, green space to greens', () => {
+    const roadPointA = localMetersToLonLat({ x: -15, y: 0 }, cell.center);
+    const roadPointB = localMetersToLonLat({ x: 15, y: 0 }, cell.center);
+    const road: WorldFeature = {
+      id: 'road-line',
+      layer: 'transportation',
+      properties: { class: 'residential' },
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [roadPointA.longitude, roadPointA.latitude],
+          [roadPointB.longitude, roadPointB.latitude],
+        ],
+      },
+    };
+    const plaza: WorldFeature = polygonFeature('transportation', 'plaza-1', 60, {
+      class: 'path',
+      subclass: 'pedestrian',
+    });
+    const park = polygonFeature('park', 'park-2', 90);
+    const geometry = createChunkGeometry(cell, [road, plaza, park]);
+
+    // The ground mesh only ever contains the base quad; roads never leak into it.
+    expect(geometry.ground.indices.length).toBe(6);
+    // Road lines and paved transportation polygons land in the asphalt mesh.
+    expect(geometry.roads.indices.length).toBeGreaterThan(0);
+    // Green space lands in the greens mesh.
+    expect(geometry.greens.indices.length).toBeGreaterThan(0);
+
+    // The park alone must account for every green triangle: transportation
+    // features (line or polygon) must not be painted with the grass material.
+    const parkOnly = createChunkGeometry(cell, [park]);
+    expect(geometry.greens.indices.length).toBe(parkOnly.greens.indices.length);
+
+    // A paved plaza must render as asphalt: it contributes road triangles even
+    // though it is polygon geometry rather than a LineString.
+    const lineOnly = createChunkGeometry(cell, [road]);
+    expect(geometry.roads.indices.length).toBeGreaterThan(lineOnly.roads.indices.length);
+  });
+
   it('never exceeds the hard triangle budget, even for dense cells', () => {
     const buildings = Array.from({ length: 30 }, (_, index) =>
       polygonFeature('building', `building-${index}`, 4 + index / 10),

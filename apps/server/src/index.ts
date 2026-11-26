@@ -53,23 +53,27 @@ import {
   applyCooldown,
   COOLDOWN_DECAY_PER_SECOND,
   applyImpact,
+  applyNearMiss,
   applyRedLight,
   applySpeeding,
   BUSTED_CONTACT_RADIUS_METERS,
   BUSTED_CONTACT_SPEED_MPS,
+  createEscapeState,
   createPoliceUnit,
   DEFAULT_SPEED_LIMIT_MPS,
   advancePoliceUnit,
   policeCountForLevel,
   policeCruiseSpeed,
+  headingBetween,
   isVisibleByPolice,
+  NEAR_MISS_MIN_PLAYER_SPEED_MPS,
+  NEAR_MISS_RADIUS_METERS,
   nearestUnitDistance,
   offsetLonLat,
   POLICE_DAMAGE_PER_RAM,
   AMBIENT_IMPACT_RADIUS_METERS,
   POLICE_IMPACT_RADIUS_METERS,
   ROADBLOCK_AHEAD_METERS,
-  ROADBLOCK_MIN_LEVEL,
   POLICE_SPAWN_MIN_METERS,
   POLICE_SPAWN_MAX_METERS,
   RED_LIGHT_MIN_SPEED_MPS,
@@ -82,7 +86,10 @@ import {
   policeUnitsNear,
   repairPoliceUnitStatus,
   roadblockUnitsFromRoute,
+  shouldDeployRoadblock,
+  updateEscape,
   wreckRepairBillCents,
+  type EscapeState,
   type PursuitPoliceUnit,
 } from './wanted-system';
 import {
@@ -160,6 +167,7 @@ interface Session {
   damageTimes: number[];
   impactTimes: number[];
   redLightTimes: Map<string, number>;
+  nearMissTimes: Map<string, number>;
   messageTimes: number[];
   actionQueue: Promise<void>;
   lastWorldAt: number;
@@ -180,6 +188,7 @@ interface SessionPursuit {
   units: PursuitPoliceUnit[];
   rerouteAtMs: number;
   roadblockAtMs: number;
+  escape: EscapeState;
   activeMission: ActiveMission | null;
   activeMissionKind: MissionKind | null;
   hideoutPosition: LonLat | null;
@@ -191,6 +200,7 @@ const IMPACT_REPORT_WINDOW_MS = 1_200;
 const WANTED_PERSIST_INTERVAL_MS = 10_000;
 const POLICE_REROUTE_MS = 3_500;
 const RED_LIGHT_REPEAT_MS = 30_000;
+const NEAR_MISS_REPEAT_MS = 4_000;
 const POLICE_DISABLED_LINGER_MS = 6_000;
 const ROADBLOCK_INTERVAL_MS = 12_000;
 const POLICE_MAX_REROUTES_PER_TICK = 2;
@@ -221,6 +231,7 @@ function createSessionPursuit(profile: PlayerProfile): SessionPursuit {
     units: [],
     rerouteAtMs: 0,
     roadblockAtMs: 0,
+    escape: createEscapeState(),
     activeMission: mission,
     activeMissionKind: mission ? mission.offer.kind : null,
     hideoutPosition:
@@ -299,6 +310,7 @@ export function createGameServer(options: GameServerOptions = {}) {
       damageTimes: [],
       impactTimes: [],
       redLightTimes: new Map(),
+      nearMissTimes: new Map(),
       messageTimes: [],
       actionQueue: Promise.resolve(),
       lastWorldAt: 0,
@@ -1279,6 +1291,35 @@ export function createGameServer(options: GameServerOptions = {}) {
       setSessionWanted(session, next.level, next.heat);
       break;
     }
+    evaluateNearMisses(session, timestamp, snapshot);
+  }
+
+  function evaluateNearMisses(session: Session, timestamp: number, snapshot: WorldSnapshot): void {
+    const car = session.car;
+    const pursuit = session.pursuit;
+    // A near miss only counts when the player is driving fast enough for the
+    // brush to be reckless; slow crawling through tight gaps stays heat-free.
+    if (car.speedMetersPerSecond < NEAR_MISS_MIN_PLAYER_SPEED_MPS) return;
+    for (const actor of snapshot.actors) {
+      if (actor.kind !== 'vehicle') continue;
+      const distance = haversineMeters(car.position, actor.position);
+      if (distance < 0.5 || distance > NEAR_MISS_RADIUS_METERS) continue;
+      const lastAt = session.nearMissTimes.get(actor.id) ?? Number.NEGATIVE_INFINITY;
+      if (timestamp - lastAt < NEAR_MISS_REPEAT_MS) continue;
+      const bearing = headingBetween(car.position, actor.position);
+      const relativeEast =
+        Math.sin(car.headingRadians) * car.speedMetersPerSecond -
+        Math.sin(actor.headingRadians) * actor.speedMetersPerSecond;
+      const relativeNorth =
+        Math.cos(car.headingRadians) * car.speedMetersPerSecond -
+        Math.cos(actor.headingRadians) * actor.speedMetersPerSecond;
+      const closingSpeed = relativeEast * Math.sin(bearing) + relativeNorth * Math.cos(bearing);
+      const next = applyNearMiss({ level: pursuit.level, heat: pursuit.heat }, closingSpeed);
+      if (next.level === pursuit.level && next.heat === pursuit.heat) continue;
+      session.nearMissTimes.set(actor.id, timestamp);
+      if (session.nearMissTimes.size > 64) session.nearMissTimes.clear();
+      setSessionWanted(session, next.level, next.heat);
+    }
   }
 
   function sendPursuit(session: Session, timestamp: number, force: boolean): void {
@@ -1321,6 +1362,7 @@ export function createGameServer(options: GameServerOptions = {}) {
     pursuit.lastTickAtMs = timestamp;
     if (pursuit.level === 0) {
       pursuit.contactSeconds = 0;
+      pursuit.escape = createEscapeState();
       if (pursuit.units.length > 0) {
         pursuit.units = [];
         sendPursuit(session, timestamp, true);
@@ -1329,7 +1371,21 @@ export function createGameServer(options: GameServerOptions = {}) {
       return;
     }
     const visible = isVisibleByPolice(session.car.position, pursuit.units);
-    const multiplier = visible ? 0 : cooldownMultiplierFor(pursuit.activeMissionKind);
+    pursuit.escape = updateEscape(pursuit.escape, {
+      visible,
+      nearestUnitMeters: nearestUnitDistance(session.car.position, pursuit.units),
+      elapsedSeconds,
+    });
+    // A player who broke line of sight long enough (or got far enough away)
+    // has escaped: heat cools down and roadblock deployment pauses until a
+    // unit regains line of sight, which clears the escape (see updateEscape)
+    // and re-engages the pursuit.
+    const escaped = pursuit.escape.escaped;
+    const multiplier = escaped
+      ? Math.max(1, cooldownMultiplierFor(pursuit.activeMissionKind))
+      : visible
+        ? 0
+        : cooldownMultiplierFor(pursuit.activeMissionKind);
     if (multiplier > 0) {
       const next = applyCooldown(
         { level: pursuit.level, heat: pursuit.heat },
@@ -1356,7 +1412,11 @@ export function createGameServer(options: GameServerOptions = {}) {
     pursuit.units = [
       ...repairPoliceUnitStatus(pursuit.units, target, () => spawnPoliceUnit(session, timestamp)),
     ];
-    if (pursuit.level >= ROADBLOCK_MIN_LEVEL && timestamp >= pursuit.roadblockAtMs) {
+    if (
+      shouldDeployRoadblock(pursuit.level) &&
+      !pursuit.escape.escaped &&
+      timestamp >= pursuit.roadblockAtMs
+    ) {
       pursuit.roadblockAtMs = timestamp + ROADBLOCK_INTERVAL_MS;
       void placeRoadblock(session, timestamp);
     }
@@ -1464,6 +1524,7 @@ export function createGameServer(options: GameServerOptions = {}) {
     pursuit.level = 0;
     pursuit.heat = 0;
     pursuit.units = [];
+    pursuit.escape = createEscapeState();
     pursuit.activeMission = null;
     pursuit.activeMissionKind = null;
     pursuit.hideoutPosition = null;

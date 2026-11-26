@@ -28,7 +28,7 @@ import { RemotePlayerStore } from './remote-player-store';
 import { GameMenu } from './game-menu';
 import { loadVehicleMods } from './mod-loader';
 import { DEFAULT_GAME_SETTINGS, ProgressStore, type GameSettings } from './progress-store';
-import { WantedSystem, WANTED_LEVELS } from './wanted-system';
+import { WantedSystem, WANTED_LEVELS, detectNearMisses, type WantedTick } from './wanted-system';
 import type { WorldRuntime } from './world-runtime';
 import type { MissionMarker } from './world-renderer';
 import './styles.css';
@@ -36,6 +36,9 @@ import './styles.css';
 const MAX_FRAME_DELTA_SECONDS = 0.25;
 const CHUNK_UPDATE_INTERVAL_MS = 450;
 const STREET_QUERY_INTERVAL_MS = 450;
+const DEFAULT_SIGHT_RADIUS_METERS = 90;
+const POLICE_SIREN_RADIUS_METERS = 250;
+const NEAR_MISS_REPEAT_MS = 4_000;
 
 const element = <T extends HTMLElement>(id: string): T => {
   const found = document.getElementById(id);
@@ -72,6 +75,7 @@ const hudElements = {
   street: element<HTMLElement>('street'),
   location: element<HTMLElement>('location-label'),
   status: element<HTMLElement>('status'),
+  wanted: element<HTMLDivElement>('wanted-stars'),
 };
 
 let currentSettings: GameSettings = DEFAULT_GAME_SETTINGS;
@@ -101,11 +105,13 @@ const remotePlayerStore = new RemotePlayerStore();
 let frameRequestId = 0;
 const progressStore = new ProgressStore();
 const wantedSystem = new WantedSystem();
-const wantedStars = element<HTMLDivElement>('wanted-stars');
+const wantedStars = hudElements.wanted;
 const wantedVignette = element<HTMLDivElement>('wanted-vignette');
 let latestPursuitUnits: readonly PoliceUnitState[] = [];
 let latestPursuitWantedLevel = 0;
+let latestPursuitSightRadius = DEFAULT_SIGHT_RADIUS_METERS;
 let lastWantedReportAt = 0;
+const nearMissTimes = new Map<string, number>();
 let wreckedExplosionAt = 0;
 const gameMap = new GameMap(
   element('minimap'),
@@ -126,6 +132,28 @@ const gameMap = new GameMap(
   },
 );
 const controls = new InputController(element('joystick'), element('joystick-knob'));
+const wreckCard = element<HTMLElement>('wreck-card');
+const wreckTitle = element<HTMLHeadingElement>('wreck-title');
+const wreckDetail = element<HTMLParagraphElement>('wreck-detail');
+const wreckRespawn = element<HTMLButtonElement>('wreck-respawn');
+function showWreckCard(variant: 'wrecked' | 'busted', detail: string): void {
+  if (variant === 'busted') {
+    wreckCard.setAttribute('data-variant', 'busted');
+    wreckTitle.textContent = 'BUSTED';
+  } else {
+    wreckCard.removeAttribute('data-variant');
+    wreckTitle.textContent = 'WASTED';
+  }
+  wreckDetail.textContent = detail;
+  wreckCard.hidden = false;
+}
+function hideWreckCard(): void {
+  wreckCard.hidden = true;
+}
+wreckRespawn.addEventListener('click', () => {
+  hideWreckCard();
+  respawnPlayer();
+});
 const vehicleAudio = new VehicleAudio();
 const gameMenu = new GameMenu(
   element('game-menu'),
@@ -193,6 +221,8 @@ function startAt(location: LonLat, label: string, status: string): void {
   wantedSystem.reset();
   latestPursuitUnits = [];
   latestPursuitWantedLevel = 0;
+  latestPursuitSightRadius = DEFAULT_SIGHT_RADIUS_METERS;
+  nearMissTimes.clear();
   wantedStars.hidden = true;
   wantedVignette.dataset.pulse = 'false';
   vehicleAudio.setSiren(false);
@@ -396,6 +426,7 @@ function connectMultiplayer(): void {
     onPursuit: (message) => {
       latestPursuitUnits = message.police;
       latestPursuitWantedLevel = message.level;
+      latestPursuitSightRadius = message.sightRadiusMeters;
       wantedSystem.applyServerPursuit(message.level);
       if (message.level > 0) {
         statusMessage = describeWanted(message.level, message.police.length);
@@ -410,6 +441,7 @@ function connectMultiplayer(): void {
           ? `Busted — fined $${(message.fineCents / 100).toFixed(2)}. Respawn from the menu.`
           : 'Busted. Respawn from the menu to continue.';
       gameMenu.setStatus(statusMessage);
+      showWreckCard('busted', statusMessage);
     },
     onWrecked: (message) => {
       wantedSystem.applyServerPursuit(0);
@@ -422,6 +454,7 @@ function connectMultiplayer(): void {
           ? `Wrecked — repair bill $${(message.repairBillCents / 100).toFixed(2)}. Respawn from the menu.`
           : 'Wrecked. Respawn from the menu.';
       gameMenu.setStatus(statusMessage);
+      showWreckCard('wrecked', 'Your car was wrecked.');
     },
     onChat: (message) => appendChatLine(message.handle, message.text),
     onStatus: (message) => {
@@ -707,7 +740,7 @@ function frame(now: number): void {
   const current = readGameState();
   const player = current.cars[0];
   const location = localMetersToLonLat(player.position, current.origin);
-  vehicleAudio.update(player, frameInput);
+  vehicleAudio.update(player, frameInput, runtime?.tractionState() ?? null);
   if (multiplayer && (player.damage ?? 0) > reportedDamage && now >= nextDamageReportAt) {
     multiplayer.sendDamageReport(player.damage ?? 0);
     reportedDamage = player.damage ?? 0;
@@ -715,17 +748,27 @@ function frame(now: number): void {
   }
   updateMissionProgress(location, now);
 
+  const worldSnapshot = ambientWorldStore.sample(now);
+  detectWantedNearMisses(worldSnapshot, location, player, now);
+  const activePursuitUnits = latestPursuitUnits.filter((unit) => unit.mode !== 'disabled');
+  const pursuitVisible = activePursuitUnits.some(
+    (unit) => haversineMeters(location, unit.position) <= latestPursuitSightRadius,
+  );
+  const sirenAudible = activePursuitUnits.some(
+    (unit) => haversineMeters(location, unit.position) <= POLICE_SIREN_RADIUS_METERS,
+  );
   const wanted = wantedSystem.tick(
     player.speedMetersPerSecond,
     (player.damage ?? 0) / 100,
-    latestPursuitWantedLevel > 0 || latestPursuitUnits.length > 0,
+    latestPursuitWantedLevel > 0 || activePursuitUnits.length > 0,
     delta,
+    { visible: pursuitVisible, sirenAudible },
   );
   if (wanted.wantedLevel > 0 && multiplayer && now >= lastWantedReportAt) {
     multiplayer.sendWantedHeat(wanted.heat);
     lastWantedReportAt = now + 500;
   }
-  renderWantedHud(wanted.wantedLevel, wantedSystem.heat, now);
+  renderWantedHud(wanted, now);
 
   if (gameMap.isLoaded()) {
     if (now >= nextStreetQueryAt) {
@@ -740,34 +783,59 @@ function frame(now: number): void {
     nextChunkUpdateAt = now + CHUNK_UPDATE_INTERVAL_MS;
   }
 
-  runtime?.setWorldSnapshot(ambientWorldStore.sample(now));
+  runtime?.setWorldSnapshot(worldSnapshot);
   runtime?.render(current, elapsedSeconds, delta, remotePlayerStore.sample(now));
   renderHud(hudElements, {
     speedMetersPerSecond: player.speedMetersPerSecond,
     streetName,
     locationLabel,
     statusMessage,
+    wanted: {
+      level: wanted.wantedLevel,
+      maxLevel: WANTED_LEVELS,
+      chaseState: wanted.chaseState,
+      flash: wanted.wantedLevel >= 3 || wanted.heat >= 0.75,
+      siren: wanted.siren,
+    },
   });
   frameRequestId = requestAnimationFrame(frame);
 }
 
-function renderWantedHud(level: number, heat: number, now: number): void {
-  const stars = Math.min(level, WANTED_LEVELS);
+function renderWantedHud(wanted: WantedTick, now: number): void {
+  const stars = Math.min(wanted.wantedLevel, WANTED_LEVELS);
   if (stars <= 0) {
-    wantedStars.hidden = true;
     wantedVignette.dataset.pulse = 'false';
     vehicleAudio.setSiren(false);
     return;
   }
-  wantedStars.hidden = false;
-  wantedStars.textContent = '\u2605'.repeat(stars) + '\u2606'.repeat(WANTED_LEVELS - stars);
-  wantedStars.dataset.flash = String(stars >= 3 || heat >= 0.75);
   wantedVignette.dataset.pulse = String(stars >= 2);
-  const sirenOn = latestPursuitUnits.length > 0 || stars >= 1;
-  vehicleAudio.setSiren(sirenOn);
-  if (stars >= 3 && now - wreckedExplosionAt > 1_000 && heat >= 0.999) {
+  vehicleAudio.setSiren(wanted.siren);
+  if (stars >= 3 && now - wreckedExplosionAt > 1_000 && wanted.heat >= 0.999) {
     wreckedExplosionAt = now;
     runtime?.triggerExplosion();
+  }
+}
+
+function detectWantedNearMisses(
+  snapshot: WorldSnapshot,
+  playerPosition: LonLat,
+  player: { readonly headingRadians: number; readonly speedMetersPerSecond: number },
+  now: number,
+): void {
+  const events = detectNearMisses(
+    {
+      position: playerPosition,
+      headingRadians: player.headingRadians,
+      speedMetersPerSecond: player.speedMetersPerSecond,
+    },
+    snapshot.actors.filter((actor) => actor.kind === 'vehicle'),
+  );
+  for (const event of events) {
+    const lastAt = nearMissTimes.get(event.actorId) ?? Number.NEGATIVE_INFINITY;
+    if (now - lastAt < NEAR_MISS_REPEAT_MS) continue;
+    nearMissTimes.set(event.actorId, now);
+    if (nearMissTimes.size > 64) nearMissTimes.clear();
+    wantedSystem.registerNearMiss(event.closingSpeedMetersPerSecond);
   }
 }
 

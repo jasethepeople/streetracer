@@ -7,6 +7,36 @@ import { getVehicleDefinition, STARTING_VEHICLE_ID, type VehicleDefinition } fro
 
 const DEFAULT_WHEEL_REST_LENGTH = 0.24;
 const MINIMUM_CHASSIS_START_HEIGHT = 0.78;
+// Arcade feel: punchier engine and brakes than the raw catalog values.
+const ARCADE_ENGINE_MULTIPLIER = 1.75;
+const ARCADE_BRAKE_MULTIPLIER = 1.4;
+// Burnout model: a hard launch from near-standstill spins the driven wheels.
+const BURNOUT_THROTTLE_THRESHOLD = 0.8;
+const BURNOUT_ENTRY_SPEED = 2.5;
+const BURNOUT_EXIT_SPEED = 6;
+const BURNOUT_MAX_SECONDS = 0.9;
+const BURNOUT_REAR_GRIP_FACTOR = 0.45;
+// Handbrake drift: locking the rear wheels also unloads their lateral grip.
+const HANDBRAKE_REAR_GRIP_FACTOR = 0.22;
+const SLIDE_SPEED_REFERENCE = 6;
+
+export interface TractionState {
+  /** 0..1 wheelspin intensity while burning out from a standstill. */
+  readonly burnout: number;
+  /** True while the car is sliding sideways (drift or handbrake slide). */
+  readonly sliding: boolean;
+  /** 0..1 lateral slip magnitude relative to the car's heading. */
+  readonly slipAmount: number;
+  /** Extra driven-wheel spin rate in rad/s above rolling (visual smoke/screech cue). */
+  readonly wheelSpinRadiansPerSecond: number;
+}
+
+const NEUTRAL_TRACTION: TractionState = {
+  burnout: 0,
+  sliding: false,
+  slipAmount: 0,
+  wheelSpinRadiansPerSecond: 0,
+};
 
 export class RapierVehicle {
   private readonly world: RAPIER.World;
@@ -20,6 +50,9 @@ export class RapierVehicle {
   private rearWheels: readonly number[] = [];
   private damage = 0;
   private lastImpactAtMs = 0;
+  private burnoutElapsed = 0;
+  private tractionState: TractionState = NEUTRAL_TRACTION;
+  private lastDrivenWheelRotation = 0;
 
   /** Invoked when the chassis takes a hard collision (impact speed delta in m/s). */
   onImpact: ((impactMetersPerSecond: number) => void) | null = null;
@@ -52,23 +85,57 @@ export class RapierVehicle {
     const speed = this.controller.currentVehicleSpeed();
     const damageFactor = 1 - this.damage * 0.0045;
     const steeringFactor = 1 - this.damage * 0.0025;
+    const throttle = clamp(input.throttle, 0, 1);
+    const brakeInput = clamp(input.brake, 0, 1);
+    const handbrake = clamp(input.handbrake, 0, 1);
     let engineForce = 0;
     let braking = 0;
 
-    if (input.brake > 0) {
-      if (speed > 0.45) braking = clamp(input.brake, 0, 1) * this.definition.handling.brakeForce;
-      else engineForce = -clamp(input.brake, 0, 1) * this.definition.handling.engineForce * 0.76;
-    } else if (input.throttle > 0) {
-      if (speed < -0.45)
-        braking = clamp(input.throttle, 0, 1) * this.definition.handling.brakeForce * 0.7;
+    if (brakeInput > 0) {
+      if (speed > 0.45)
+        braking = brakeInput * this.definition.handling.brakeForce * ARCADE_BRAKE_MULTIPLIER;
       else
         engineForce =
-          clamp(input.throttle, 0, 1) * this.definition.handling.engineForce * damageFactor;
+          -brakeInput * this.definition.handling.engineForce * 0.76 * ARCADE_ENGINE_MULTIPLIER;
+    } else if (throttle > 0) {
+      if (speed < -0.45)
+        braking = throttle * this.definition.handling.brakeForce * 0.7 * ARCADE_BRAKE_MULTIPLIER;
+      else
+        engineForce =
+          throttle * this.definition.handling.engineForce * damageFactor * ARCADE_ENGINE_MULTIPLIER;
     }
 
     if (speed >= this.definition.handling.maxSpeedMps && engineForce > 0) engineForce = 0;
     if (speed <= -this.definition.handling.maxReverseMps && engineForce < 0) engineForce = 0;
-    const handbrake = clamp(input.handbrake, 0, 1);
+
+    // Burnout: hard throttle from near-standstill spins the driven wheels and
+    // limits initial movement while the tires fight for grip.
+    const wantsLaunch =
+      brakeInput === 0 &&
+      throttle >= BURNOUT_THROTTLE_THRESHOLD &&
+      engineForce > 0 &&
+      speed > -0.5 &&
+      speed < BURNOUT_EXIT_SPEED;
+    if (!wantsLaunch) this.burnoutElapsed = 0;
+    const burning =
+      wantsLaunch &&
+      this.burnoutElapsed < BURNOUT_MAX_SECONDS &&
+      (this.burnoutElapsed > 0 || speed < BURNOUT_ENTRY_SPEED || handbrake > 0);
+    let burnout = 0;
+    let rearGripFactor = 1;
+    if (burning) {
+      this.burnoutElapsed += delta;
+      const progress = clamp(this.burnoutElapsed / BURNOUT_MAX_SECONDS, 0, 1);
+      burnout = 1 - 0.4 * progress;
+      engineForce *= 0.38 + 0.62 * progress;
+      rearGripFactor = BURNOUT_REAR_GRIP_FACTOR;
+    }
+    if (handbrake > 0) {
+      // Locked rear wheels lose lateral grip: the car slides and can drift.
+      rearGripFactor = Math.min(rearGripFactor, 1 - (1 - HANDBRAKE_REAR_GRIP_FACTOR) * handbrake);
+    }
+
+    const grip = this.definition.handling.grip;
     for (const wheel of this.frontWheels) {
       this.controller.setWheelSteering(
         wheel,
@@ -76,11 +143,16 @@ export class RapierVehicle {
       );
       this.controller.setWheelEngineForce(wheel, (engineForce / this.frontWheels.length) * 0.3);
       this.controller.setWheelBrake(wheel, braking + handbrake * 450);
+      this.controller.setWheelFrictionSlip(wheel, grip);
     }
     for (const wheel of this.rearWheels) {
       this.controller.setWheelSteering(wheel, 0);
       this.controller.setWheelEngineForce(wheel, (engineForce / this.rearWheels.length) * 0.7);
-      this.controller.setWheelBrake(wheel, braking + handbrake * 1_800);
+      // During a handbrake burnout the engine fights a softer rear brake so
+      // the wheels can actually spin instead of staying locked.
+      const rearHandbrake = handbrake * 1_800 * (burning ? 1 - 0.8 * throttle : 1);
+      this.controller.setWheelBrake(wheel, braking + rearHandbrake);
+      this.controller.setWheelFrictionSlip(wheel, grip * rearGripFactor);
     }
     const speedBeforeStep = Math.hypot(this.chassis.linvel().x, this.chassis.linvel().z);
     this.world.timestep = delta;
@@ -88,7 +160,13 @@ export class RapierVehicle {
     this.world.step();
     this.recordImpact(speedBeforeStep);
     this.chassis.wakeUp();
+    this.updateTraction(burnout, handbrake, delta);
     return this.snapshot();
+  }
+
+  /** Current wheelspin/slide state for smoke, screech, and HUD integration. */
+  traction(): TractionState {
+    return this.tractionState;
   }
 
   snapshot(): CarState {
@@ -121,6 +199,9 @@ export class RapierVehicle {
     this.world.removeVehicleController(this.controller);
     this.world.removeRigidBody(this.chassis);
     this.definition = nextDefinition;
+    this.burnoutElapsed = 0;
+    this.tractionState = NEUTRAL_TRACTION;
+    this.lastDrivenWheelRotation = 0;
     const rig = this.createVehicleRig();
     this.chassis = rig.chassis;
     this.controller = rig.controller;
@@ -184,6 +265,9 @@ export class RapierVehicle {
   reset(origin: LonLat): void {
     for (const key of this.chunkBodies.keys()) this.removeChunk(key);
     this.origin = { ...origin };
+    this.burnoutElapsed = 0;
+    this.tractionState = NEUTRAL_TRACTION;
+    this.lastDrivenWheelRotation = 0;
     this.placeAt({ x: 0, y: 0 }, 0);
     for (let wheel = 0; wheel < this.controller.numWheels(); wheel += 1) {
       this.controller.setWheelEngineForce(wheel, 0);
@@ -254,6 +338,36 @@ export class RapierVehicle {
       controller.setWheelSideFrictionStiffness(index, 1.4);
     }
     return { chassis, controller, frontWheels, rearWheels };
+  }
+
+  private updateTraction(burnout: number, handbrake: number, delta: number): void {
+    const velocity = this.chassis.linvel();
+    const rotation = this.chassis.rotation();
+    const forwardX = 2 * (rotation.x * rotation.z + rotation.w * rotation.y);
+    const forwardZ = 1 - 2 * (rotation.x * rotation.x + rotation.y * rotation.y);
+    const forwardSpeed = velocity.x * forwardX + velocity.z * forwardZ;
+    const lateralSpeed = velocity.x * forwardZ - velocity.z * forwardX;
+    const slipAmount = clamp(Math.abs(lateralSpeed) / SLIDE_SPEED_REFERENCE, 0, 1);
+    const groundSpeed = Math.hypot(velocity.x, velocity.z);
+    const sliding = (slipAmount > 0.3 && groundSpeed > 2) || (handbrake > 0.4 && groundSpeed > 2.5);
+    let wheelSpinRadiansPerSecond = 0;
+    const drivenWheel = this.rearWheels[0];
+    if (drivenWheel !== undefined && delta > 0) {
+      const rotationNow = this.controller.wheelRotation(drivenWheel) ?? 0;
+      const rollingRate = Math.abs(forwardSpeed) / this.definition.dimensions.wheelRadius;
+      const rawRate = Math.abs((rotationNow - this.lastDrivenWheelRotation) / delta);
+      wheelSpinRadiansPerSecond = Math.max(0, rawRate - rollingRate);
+      this.lastDrivenWheelRotation = rotationNow;
+    }
+    // The raycast wheels visually roll with the chassis, so model the extra
+    // slip spin of a burnout explicitly for smoke/screech integration.
+    wheelSpinRadiansPerSecond = Math.max(wheelSpinRadiansPerSecond, burnout * 45);
+    this.tractionState = {
+      burnout,
+      sliding,
+      slipAmount,
+      wheelSpinRadiansPerSecond: clamp(wheelSpinRadiansPerSecond, 0, 400),
+    };
   }
 
   private recordImpact(speedBeforeStep: number): void {
